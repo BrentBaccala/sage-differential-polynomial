@@ -1,0 +1,10 @@
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.so
+*.o
+# Cython-generated C
+src/sage_differential_polynomial/_blad.c
+src/sage_differential_polynomial/*.html
+.pytest_cache/
