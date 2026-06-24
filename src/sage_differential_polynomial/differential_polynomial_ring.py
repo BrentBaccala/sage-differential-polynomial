@@ -184,14 +184,14 @@ class DifferentialPolynomialRing(UniqueRepresentation, Parent):
         else:
             blocks = [list(self._indeterminates)]
         # Parameters are order-zero generators that must be DECLARED to BLAD as
-        # ranking symbols (otherwise "known symbol expected" at install).  When
-        # the caller did not give an explicit ``blocks`` layout, append each
-        # parameter not already in a block as a trailing block, so parameters
-        # rank below all differential indeterminates -- the Maple convention
-        # (parameters are 0-order dependent variables at the bottom of the
-        # ranking).  An explicit ``blocks`` is taken as authoritative and the
-        # caller is responsible for placing the parameters.
-        if self._parameters and not (self._ranking and "blocks" in self._ranking):
+        # ranking symbols (otherwise "known symbol expected" at install).  Append
+        # every parameter not already placed in a block as a trailing block, so
+        # parameters rank below all differential indeterminates -- the Maple
+        # convention (parameters are 0-order dependent variables at the bottom of
+        # the ranking).  This holds whether or not the caller gave an explicit
+        # ``blocks`` layout: an explicit layout still need not list the
+        # parameters (they always belong at the bottom).
+        if self._parameters:
             in_blocks = {n for blk in blocks for n in blk}
             tail = [p for p in self._parameters if p not in in_blocks]
             if tail:
@@ -371,18 +371,55 @@ class DifferentialPolynomialRing(UniqueRepresentation, Parent):
             return True
         return None
 
+    def _block_layout(self):
+        """The block layout (a list of head-name lists) BLAD installs, mirroring
+        :meth:`_build_ranking_string`.  Earlier block == higher rank.  Cached."""
+        cached = getattr(self, "_block_layout_cache", None)
+        if cached is not None:
+            return cached
+        if self._ranking and "blocks" in self._ranking:
+            blocks = [list(b) for b in self._ranking["blocks"]]
+        else:
+            blocks = [list(self._indeterminates)]
+        if self._parameters:
+            in_blocks = {n for blk in blocks for n in blk}
+            tail = [p for p in self._parameters if p not in in_blocks]
+            if tail:
+                blocks = blocks + [tail]
+        # head -> (block_index, position_within_block)
+        layout = {}
+        for bi, blk in enumerate(blocks):
+            for pj, head in enumerate(blk):
+                layout[head] = (bi, pj)
+        self._block_layout_cache = layout
+        return layout
+
     def _ranking_key(self, blad_name):
-        """Sort key approximating the BLAD ranking (higher rank -> earlier)."""
+        """Sort key matching the BLAD ranking (higher rank -> sorts EARLIER, i.e.
+        smaller key).
+
+        BLAD's installed ranking is block-major: an earlier block outranks a
+        later one regardless of differentiation order (elimination ranking
+        between blocks).  Within a block the default ``grlexA`` subranking ranks
+        by total differentiation order (higher order = higher rank), then by the
+        head's position in the block.  So a head in block 0 (e.g. ``DDPs`` in a
+        per-indeterminate split) outranks every derivative of a head in block 1,
+        but within a single block (the package default, all indeterminates in
+        block 0) order dominates -- which is why ``u[x,x]`` outranks ``u[x]``.
+        """
         if "[" in blad_name:
             head, rest = blad_name.split("[", 1)
             order = len(rest.rstrip("]").split(","))
         else:
             head, order = blad_name, 0
-        try:
-            hpos = self._indeterminates.index(head)
-        except ValueError:
-            hpos = 1000
-        return (-order, hpos, blad_name)
+        layout = self._block_layout()
+        if head in layout:
+            block_idx, head_pos = layout[head]
+        else:
+            block_idx, head_pos = 1000, 1000
+        # block-major (smaller block index = higher rank), then higher order
+        # first within the block, then head position, then name for stability.
+        return (block_idx, -order, head_pos, blad_name)
 
     # -- Phase A: differential primitives the consumer needs ----------------
     def factor_derivative(self, name):
