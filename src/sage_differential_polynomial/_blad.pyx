@@ -100,7 +100,9 @@ cdef extern from *:
         if (sdp_initialized) return 0;
         /* Keep Sage's GMP allocators: install a no-op setter so bas_restart
            does not call mp_set_memory_functions. */
-        ba0_set_settings_gmp(&sdp_noop_set_memory_functions, "Integer");
+        /* Integer_PFE = 0  -> print integers plainly ("3", not "Integer(3)"),
+           so to_string() output re-parses and reads cleanly in _repr_. */
+        ba0_set_settings_gmp(&sdp_noop_set_memory_functions, (char *)0);
         bas_restart(0, 0);
         BA0_TRY {
             bav_set_settings_ordering("ranking");
