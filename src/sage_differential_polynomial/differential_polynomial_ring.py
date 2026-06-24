@@ -183,6 +183,19 @@ class DifferentialPolynomialRing(UniqueRepresentation, Parent):
             blocks = [list(b) for b in self._ranking["blocks"]]
         else:
             blocks = [list(self._indeterminates)]
+        # Parameters are order-zero generators that must be DECLARED to BLAD as
+        # ranking symbols (otherwise "known symbol expected" at install).  When
+        # the caller did not give an explicit ``blocks`` layout, append each
+        # parameter not already in a block as a trailing block, so parameters
+        # rank below all differential indeterminates -- the Maple convention
+        # (parameters are 0-order dependent variables at the bottom of the
+        # ranking).  An explicit ``blocks`` is taken as authoritative and the
+        # caller is responsible for placing the parameters.
+        if self._parameters and not (self._ranking and "blocks" in self._ranking):
+            in_blocks = {n for blk in blocks for n in blk}
+            tail = [p for p in self._parameters if p not in in_blocks]
+            if tail:
+                blocks = blocks + [tail]
         sub = (self._ranking or {}).get("subranking")
         block_strs = []
         for blk in blocks:
