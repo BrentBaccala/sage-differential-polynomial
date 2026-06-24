@@ -128,5 +128,31 @@ def run_regression(verbose=True):
     chk("differential_reduce",
         str(differential_reduce(A, [B], ['x'])) == '4*u_x^2*u^2 + u^2 - u')
 
+    # -- Phase A primitives ------------------------------------------------
+    chk("factor_derivative", R.factor_derivative('u[x,x]') == ((('x', 2),), 'u'))
+    chk("factor_derivative_head", R.factor_derivative('u') == ((), 'u'))
+    chk("sort_descending",
+        R.sort(['u', 'u[x,x]', 'u[x]']) == ['u[x,x]', 'u[x]', 'u'])
+    chk("sort_ascending",
+        R.sort(['u', 'u[x,x]', 'u[x]'], 'ascending') == ['u', 'u[x]', 'u[x,x]'])
+    chk("leading_rank", str(R('u[x,x]^3 + u').leading_rank()) == 'u_x_x^3')
+    chk("appearing_derivatives",
+        R('u[x,x]^2 + 3*u[x] - 5').appearing_derivatives(as_names=True)
+        == ['u[x,x]', 'u[x]'])
+
+    # The full *differential* pseudo-remainder (Phase A's substantive add): a
+    # fixed-point Ritt reduction by a reductor and ALL its derivatives.  Matches
+    # the prem+prolong orchestration (differential_reduce) and BLAD.
+    rdp, hdp = R.differential_prem(A, [B])
+    chk("differential_prem", str(rdp) == '4*u_x^2*u^2 + u^2 - u')
+    chk("differential_prem_matches_reduce",
+        rdp == differential_reduce(A, [B], ['x']))
+    # a deeper case that needs the fixed-point iteration (a reduction step
+    # introduces a lower derivative that must itself be reduced):
+    A2 = R('u[x,x,x,x] - u')
+    B2 = R('u[x,x] + u[x] - 1')
+    r2, _h2 = R.differential_prem(A2, [B2])
+    chk("differential_prem_fixedpoint", str(r2) == '-u_x - u + 1')
+
     passed = sum(1 for _, c in checks if c)
     return passed, len(checks)

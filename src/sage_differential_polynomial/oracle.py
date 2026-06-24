@@ -47,8 +47,17 @@ def jet_to_sympy(name):
         pieces.append((Symbol(d), k))
     return Derivative(base, *pieces)
 
+# Mirror the package's default ranking: a SINGLE block over all heads
+# (``DifferentialPolynomialRing._build_ranking_string`` emits
+# ``blocks = [[u,v,...]]`` unless an explicit block split is given), so the
+# oracle's leader/prem agree with the package's installed ranking.  A
+# ``blocks`` key in the request overrides this (a list of head-name lists).
+if req.get("blocks"):
+    blocks = [[heads[h] for h in blk] for blk in req["blocks"]]
+else:
+    blocks = [[heads[h] for h in req["heads"]]]
 R = DA.DifferentialRing(derivations=ders,
-                        blocks=[heads[h] for h in req["heads"]],
+                        blocks=blocks,
                         parameters=params)
 
 def parse(expr_terms):

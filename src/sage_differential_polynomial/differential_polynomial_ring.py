@@ -33,6 +33,13 @@ EXAMPLES::
 
 import re
 
+# Import sage.all first to fully initialize the Sage library's import graph.
+# Under ``sage -python`` (as opposed to the ``sage`` REPL) importing granular
+# modules such as ``sage.rings.rational_field`` before the library is
+# initialized triggers a circular-import ``ImportError: cannot import name QQ``.
+# Pulling in ``sage.all`` once up front orders the initialization correctly.
+import sage.all  # noqa: F401
+
 from sage.structure.parent import Parent
 from sage.structure.element import Element
 from sage.structure.unique_representation import UniqueRepresentation
@@ -364,6 +371,196 @@ class DifferentialPolynomialRing(UniqueRepresentation, Parent):
             hpos = 1000
         return (-order, hpos, blad_name)
 
+    # -- Phase A: differential primitives the consumer needs ----------------
+    def factor_derivative(self, name):
+        r"""
+        Split a jet derivative into ``(theta, base)``: its derivation
+        multi-index ``theta`` (a tuple of ``(derivation, multiplicity)`` pairs,
+        in derivation order) and its order-zero dependent head ``base`` (a
+        string).
+
+        Mirrors BLAD's ``factor_derivative`` (which returns ``(theta, base)``).
+        ``theta`` is the empty tuple for an order-zero head.
+
+        INPUT: ``name`` -- a BLAD jet name (``'u[x,x]'``), a Sage jet name
+        (``'u_x_x'``), or a degree-one element of this ring.
+
+        OUTPUT: ``(theta, base)`` where ``theta`` is a tuple
+        ``((d1, m1), (d2, m2), ...)`` over the ring's derivations (zero-mult
+        entries omitted) and ``base`` is the head name.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R.factor_derivative('u[x,x]')
+            ((('x', 2),), 'u')
+            sage: R.factor_derivative('u')
+            ((), 'u')
+
+        A Sage-name or element argument is accepted too::
+
+            sage: R.factor_derivative('u_x')
+            ((('x', 1),), 'u')
+            sage: p = R('u[x]')
+            sage: R.factor_derivative(p)
+            ((('x', 1),), 'u')
+
+        With several derivations the multi-index lists each (multiplicity
+        collapsed); see the regression battery for a two-derivation check
+        (a fresh process per ring -- v1 supports a single live ring).
+        """
+        bn = self._as_blad_name(name)
+        if "[" not in bn:
+            return ((), bn)
+        head, rest = bn.split("[", 1)
+        ders = rest.rstrip("]").split(",")
+        counts = {}
+        for d in ders:
+            counts[d] = counts.get(d, 0) + 1
+        theta = tuple((d, counts[d]) for d in self._derivations if d in counts)
+        return (theta, head)
+
+    def _as_blad_name(self, name):
+        """Coerce a jet identifier (element / Sage name / BLAD name) to a BLAD
+        name (``u[x,x]``)."""
+        if isinstance(name, DifferentialPolynomial):
+            ld = name.leader()
+            if ld is None:
+                # an order-zero head element prints as the head itself
+                return name._blad_repr()
+            return ld
+        s = str(name)
+        if "[" in s:
+            return s
+        return sage_to_blad_name(s, self._heads(), set(self._derivations))
+
+    def sort(self, iterable, direction="descending"):
+        r"""
+        Rank-order a list of derivatives / jet names / elements by the ring's
+        ranking.
+
+        ``direction='descending'`` (default) returns highest-rank first;
+        ``'ascending'`` returns lowest-rank first.  Elements of the iterable
+        may be BLAD names, Sage names, or degree-one :class:`DifferentialPolynomial`
+        elements; the returned list preserves the input objects (only reordered).
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R.sort(['u', 'u[x,x]', 'u[x]'])
+            ['u[x,x]', 'u[x]', 'u']
+            sage: R.sort(['u', 'u[x,x]', 'u[x]'], 'ascending')
+            ['u', 'u[x]', 'u[x,x]']
+        """
+        reverse = (direction == "descending")
+        # _ranking_key sorts ascending with higher-rank-first (negative order);
+        # so ascending key order == descending rank order.  Flip to match.
+        return sorted(iterable,
+                      key=lambda d: self._ranking_key(self._as_blad_name(d)),
+                      reverse=not reverse)
+
+    def differential_prem(self, p, reductors):
+        r"""
+        Full **differential** pseudo-remainder of ``p`` by ``reductors``.
+
+        Reduce ``p`` by each reductor *and all its derivatives* (Ritt
+        reduction), highest-leader-first.  This is the differential analogue of
+        :meth:`DifferentialPolynomial.prem` (which reduces by a single algebraic
+        leader only): a derivative ``D`` strictly above a reductor's leader is
+        eliminated by that reductor prolonged to leader ``D``; the leader itself
+        is reduced last.
+
+        Returns ``(r, h)`` where ``r`` is the reduced
+        :class:`DifferentialPolynomial` and ``h`` is the product of the
+        initials/separants the reduction multiplied through (a
+        :class:`DifferentialPolynomial`; ``R.one()`` if none) -- the
+        non-vanishing Thomas inequation cofactor.
+
+        v1 supports a list with a single reductor (matching the consumer);
+        a multi-reductor list reduces against each in turn.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: A = R('u[x,x,x]^2 + u[x,x] - u')
+            sage: B = R('u[x,x] - u^2')
+            sage: r, h = R.differential_prem(A, [B]); r
+            4*u_x^2*u^2 + u^2 - u
+        """
+        if not isinstance(reductors, (list, tuple)):
+            reductors = [reductors]
+        r = self(p) if not isinstance(p, DifferentialPolynomial) else p
+        h = self.one()
+        for B in reductors:
+            r, hB = self._differential_prem_one(r, B)
+            h = h * hB
+            if r.is_zero():
+                break
+        return r, h
+
+    def _differential_prem_one(self, A, B):
+        """Full differential pseudo-remainder of ``A`` by a single reductor
+        ``B`` and all its appearing derivatives, highest-leader-first.  Returns
+        ``(r, h)`` with ``h`` the accumulated initial/separant cofactor.
+
+        Iterates to a fixed point: a pseudo-division against a prolonged
+        reductor of leader ``D`` can introduce strictly lower derivatives of the
+        same head (e.g. reducing ``u[x,x,x,x]`` against ``D_x^2 B`` produces
+        ``u[x,x,x]`` terms), which must themselves be reduced.  So we repeatedly
+        pick the highest appearing derivative of ``B``'s head with multidegree
+        ``>=`` ``B``'s leader and reduce against the matching prolongation until
+        no such derivative remains."""
+        bl = B.leader()
+        if bl is None:
+            return A, self.one()
+        _theta_B, headB = self.factor_derivative(bl)
+        mdB = self._multidegree(bl)
+
+        r = A
+        h = self.one()
+        guard = 0
+        while not r.is_zero():
+            guard += 1
+            if guard > 10000:
+                break
+            # highest appearing derivative of B's head that is a derivative of
+            # B's leader (componentwise >=).
+            target = None
+            for nm in self.sort(r._jet_names(), "descending"):
+                _t2, head2 = self.factor_derivative(nm)
+                if head2 != headB:
+                    continue
+                md2 = self._multidegree(nm)
+                if all(md2.get(d, 0) >= mdB.get(d, 0)
+                       for d in self._derivations):
+                    target = (nm, md2)
+                    break
+            if target is None:
+                break
+            nm, md2 = target
+            # prolong B by theta = md2 - mdB
+            qD = B
+            for d in self._derivations:
+                for _ in range(md2.get(d, 0) - mdB.get(d, 0)):
+                    qD = qD.differentiate(d)
+            rD, hpow = r.prem_with_power(qD, v=nm)
+            if rD == r:
+                break               # no progress (degree too low) -- avoid loop
+            r = rD
+            if hpow:
+                ini = qD.initial()
+                for _ in range(hpow):
+                    h = h * ini
+        return r, h
+
+    def _multidegree(self, name):
+        """``{derivation: multiplicity}`` dict for a jet name."""
+        _theta, _base = self.factor_derivative(name)
+        return {d: m for d, m in _theta}
+
 
 # ---------------------------------------------------------------------------
 # Element
@@ -647,12 +844,108 @@ class DifferentialPolynomial(Element):
             sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
             sage: R('u[x,x]^2 + 3*u[x] - 5').leader()
             'u[x,x]'
+
+        A constant has no leader::
+
+            sage: R('5').leader() is None
+            True
         """
-        return _blad.leader_name(self._h())
+        try:
+            return _blad.leader_name(self._h())
+        except _blad.BladError:
+            # BLAD raises "non numeric polynomial expected" on a pure constant
+            return None
 
     def leading_derivative(self):
         """Alias for :meth:`leader`."""
         return self.leader()
+
+    def leading_rank(self):
+        r"""
+        The leading rank ``leader ** degree_in_leader`` as a
+        :class:`DifferentialPolynomial` (``self.parent().one()`` for a constant).
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R('u[x,x]^3 + 3*u[x] - 5').leading_rank()
+            u_x_x^3
+            sage: R('3*u + 1').leading_rank()
+            u
+            sage: R('5').leading_rank()
+            1
+        """
+        R = self.parent()
+        ld = self.leader()
+        if ld is None:
+            return R.one()
+        deg = self.degree_in(ld)
+        lead = R(ld)
+        result = R.one()
+        for _ in range(deg):
+            result = result * lead
+        return result
+
+    def degree_in(self, name):
+        r"""
+        The degree of ``self`` in the jet ``name`` (a BLAD/Sage name or element).
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R('u[x,x]^3 + 3*u[x] - 5').degree_in('u[x,x]')
+            3
+            sage: R('u[x,x]^3 + 3*u[x] - 5').degree_in('u[x]')
+            1
+        """
+        R = self.parent()
+        bn = R._as_blad_name(name)
+        best = 0
+        for _coeff, term in _blad.read_terms(self._h()):
+            for nm, deg in term:
+                if nm == bn and deg > best:
+                    best = deg
+        return int(best)
+
+    def appearing_derivatives(self, as_names=False, selection="indeterminates"):
+        r"""
+        The jets / derivatives appearing in ``self``, in ranking order
+        (highest first).
+
+        ``selection``:
+
+        - ``'indeterminates'`` (default) -- the differential-indeterminate jets
+          (excludes pure derivations and parameters).
+        - ``'all'`` -- every appearing name.
+
+        ``as_names=True`` returns BLAD name strings; otherwise degree-one
+        :class:`DifferentialPolynomial` elements.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R('u[x,x]^2 + 3*u[x] - 5').appearing_derivatives(as_names=True)
+            ['u[x,x]', 'u[x]']
+        """
+        R = self.parent()
+        names = self._jet_names()
+        if selection == "indeterminates":
+            params = set(R._parameters)
+            ders = set(R._derivations)
+            kept = []
+            for nm in names:
+                head = nm.split("[", 1)[0]
+                if head in ders or head in params:
+                    continue
+                kept.append(nm)
+            names = kept
+        ordered = R.sort(names, "descending")
+        if as_names:
+            return list(ordered)
+        return [R(nm) for nm in ordered]
 
     def prem(self, other, v=None):
         r"""
