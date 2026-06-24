@@ -116,6 +116,23 @@ class DifferentialPolynomialRing(UniqueRepresentation, Parent):
         ['x']
         sage: R.indeterminates()
         ['u']
+
+    TESTS:
+
+    Category-framework conformance::
+
+        sage: TestSuite(R).run()
+
+    .. NOTE::
+
+        v1 supports a single live ring at a time (BLAD has one global
+        differential ring).  Constructing a second ring in the same session
+        reinstalls the BLAD ring and bumps the epoch; do not hold two live
+        rings of different shape simultaneously in v1.  A two-derivation,
+        two-indeterminate ring (Cauchy-Riemann shape) works the same way in a
+        fresh session::
+
+            DifferentialPolynomialRing(QQ, ['u', 'v'], ['x', 'y'])
     """
 
     _global_epoch = 0
@@ -294,12 +311,38 @@ class DifferentialPolynomialRing(UniqueRepresentation, Parent):
 
         names = sorted(needed, key=self._ranking_key)
         if not names:
-            names = ["__zero__"]
+            # a constant polynomial: build a trivial 1-generator shadow so the
+            # MPolynomialRing is well-formed (the gen is unused).
+            names = [self._indeterminates[0] if self._indeterminates
+                     else self._derivations[0]]
         sage_names = [blad_to_sage_name(n) for n in names]
         ring = PolynomialRing(self._base, sage_names, order="degrevlex")
         gmap = {bn: ring.gen(i) for i, bn in enumerate(names)}
         self._jet_shadow_cache.append((needed_fs, ring, gmap))
         return ring, gmap
+
+    # -- ring axioms --------------------------------------------------------
+    def zero(self):
+        return self.element_class(self, "0")
+
+    def one(self):
+        return self.element_class(self, "1")
+
+    def _an_element_(self):
+        head = self._indeterminates[0]
+        der = self._derivations[0]
+        return self.element_class(self, "%s[%s] + 2*%s + 1" % (head, der, head))
+
+    def characteristic(self):
+        return ZZ(0)
+
+    def _coerce_map_from_(self, S):
+        # accept ZZ, QQ, and the base into the ring (constants)
+        from sage.rings.integer_ring import ZZ as _ZZ
+        from sage.rings.rational_field import QQ as _QQ
+        if S in (_ZZ, _QQ) or S is self.base():
+            return True
+        return None
 
     def _ranking_key(self, blad_name):
         """Sort key approximating the BLAD ranking (higher rank -> earlier)."""
@@ -334,6 +377,23 @@ class DifferentialPolynomial(Element):
         u_x_x^2 + 3*u_x - 5
         sage: p.leader()
         'u[x,x]'
+
+    TESTS:
+
+    Ring arithmetic is C-native (BLAD ``bap``), not materialization::
+
+        sage: q = R('u[x,x] - u')
+        sage: (p - p).is_zero()
+        True
+        sage: (p + q) - q == p
+        True
+        sage: -(-p) == p
+        True
+
+    Pickling round-trips via the durable BLAD-string snapshot::
+
+        sage: loads(dumps(p)) == p
+        True
     """
 
     def __init__(self, parent, value):
@@ -419,6 +479,10 @@ class DifferentialPolynomial(Element):
     def __hash__(self):
         return hash(self._h().to_string())
 
+    def __reduce__(self):
+        # serialize via the durable BLAD string snapshot (never the C handle)
+        return (_reconstruct_element, (self.parent(), self._h().to_string()))
+
     def _richcmp_(self, other, op):
         eq = (self._h() == other._h())
         if op == 2:
@@ -429,6 +493,27 @@ class DifferentialPolynomial(Element):
 
     def is_zero(self):
         return self._h().is_zero()
+
+    # -- ring arithmetic (C-native bap, NOT materialization to Sage) --------
+    def _add_(self, other):
+        R = self.parent()
+        return DifferentialPolynomial._wrap_handle(
+            R, _blad.add(self._h(), other._h(), R.epoch))
+
+    def _sub_(self, other):
+        R = self.parent()
+        return DifferentialPolynomial._wrap_handle(
+            R, _blad.sub(self._h(), other._h(), R.epoch))
+
+    def _mul_(self, other):
+        R = self.parent()
+        return DifferentialPolynomial._wrap_handle(
+            R, _blad.mul(self._h(), other._h(), R.epoch))
+
+    def _neg_(self):
+        R = self.parent()
+        return DifferentialPolynomial._wrap_handle(
+            R, _blad.neg(self._h(), R.epoch))
 
     def number_of_terms(self):
         r"""
@@ -640,6 +725,11 @@ class DifferentialPolynomial(Element):
 
 
 DifferentialPolynomialRing.Element = DifferentialPolynomial
+
+
+def _reconstruct_element(parent, blad_string):
+    """Unpickle helper: rebuild an element from its BLAD string snapshot."""
+    return parent.element_class(parent, blad_string)
 
 
 def _term_sort_key(term, R):

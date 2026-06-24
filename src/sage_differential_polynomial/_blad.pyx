@@ -240,6 +240,32 @@ cdef extern from *:
         } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
         return 0;
     }
+
+    /* C-native ring arithmetic (no materialization to Sage). */
+    static int sdp_add(struct bap_polynom_mpz *o, struct bap_polynom_mpz *a,
+                       struct bap_polynom_mpz *b, char *err, int n) {
+        BA0_TRY { bap_add_polynom_mpz(o, a, b); }
+        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return 0;
+    }
+    static int sdp_sub(struct bap_polynom_mpz *o, struct bap_polynom_mpz *a,
+                       struct bap_polynom_mpz *b, char *err, int n) {
+        BA0_TRY { bap_sub_polynom_mpz(o, a, b); }
+        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return 0;
+    }
+    static int sdp_mul(struct bap_polynom_mpz *o, struct bap_polynom_mpz *a,
+                       struct bap_polynom_mpz *b, char *err, int n) {
+        BA0_TRY { bap_mul_polynom_mpz(o, a, b); }
+        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return 0;
+    }
+    static int sdp_neg(struct bap_polynom_mpz *o, struct bap_polynom_mpz *a,
+                       char *err, int n) {
+        BA0_TRY { bap_neg_polynom_mpz(o, a); }
+        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return 0;
+    }
     """
     int sdp_init(char *, int)
     int sdp_install_ranking(const char *, char *, int)
@@ -256,6 +282,10 @@ cdef extern from *:
     int sdp_initial(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, char *, int)
     int sdp_prem(cb.bap_polynom_mpz *, long *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, char *, int)
     int sdp_prem_var(cb.bap_polynom_mpz *, long *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, const char *, char *, int)
+    int sdp_add(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, char *, int)
+    int sdp_sub(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, char *, int)
+    int sdp_mul(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, char *, int)
+    int sdp_neg(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, char *, int)
 
 
 DEF ERRBUF = 1024
@@ -697,3 +727,44 @@ def prem(PolyHandle a, PolyHandle b, long epoch, var=None):
         if sdp_prem_var(out, &h, a.ptr, b.ptr, vb, err, ERRBUF) != 0:
             raise BladError(err.decode("utf-8", "replace"))
     return PolyHandle._wrap(out, epoch), int(h)
+
+
+cdef PolyHandle _binop(PolyHandle a, PolyHandle b, int which, long epoch):
+    cdef char err[ERRBUF]
+    err[0] = 0
+    cdef cb.bap_polynom_mpz *out = sdp_new_poly(err, ERRBUF)
+    if out == NULL:
+        raise BladError(err.decode("utf-8", "replace"))
+    cdef int rc
+    if which == 0:
+        rc = sdp_add(out, a.ptr, b.ptr, err, ERRBUF)
+    elif which == 1:
+        rc = sdp_sub(out, a.ptr, b.ptr, err, ERRBUF)
+    else:
+        rc = sdp_mul(out, a.ptr, b.ptr, err, ERRBUF)
+    if rc != 0:
+        raise BladError(err.decode("utf-8", "replace"))
+    return PolyHandle._wrap(out, epoch)
+
+
+def add(PolyHandle a, PolyHandle b, long epoch):
+    return _binop(a, b, 0, epoch)
+
+
+def sub(PolyHandle a, PolyHandle b, long epoch):
+    return _binop(a, b, 1, epoch)
+
+
+def mul(PolyHandle a, PolyHandle b, long epoch):
+    return _binop(a, b, 2, epoch)
+
+
+def neg(PolyHandle a, long epoch):
+    cdef char err[ERRBUF]
+    err[0] = 0
+    cdef cb.bap_polynom_mpz *out = sdp_new_poly(err, ERRBUF)
+    if out == NULL:
+        raise BladError(err.decode("utf-8", "replace"))
+    if sdp_neg(out, a.ptr, err, ERRBUF) != 0:
+        raise BladError(err.decode("utf-8", "replace"))
+    return PolyHandle._wrap(out, epoch)
