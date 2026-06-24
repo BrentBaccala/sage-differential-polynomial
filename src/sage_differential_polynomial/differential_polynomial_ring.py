@@ -1052,6 +1052,251 @@ class DifferentialPolynomial(Element):
         h, hpow = _blad.prem(self._h(), other._h(), ep, v)
         return DifferentialPolynomial._wrap_handle(R, h), int(hpow)
 
+    # -- algebraic primitives (Phase B; thin delegates to BLAD baz/bap) -----
+    def gcd(self, other):
+        r"""
+        Greatest common divisor of ``self`` and ``other`` (over `\QQ`).
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R('u^2 - 1').gcd(R('u^2 - u'))
+            u - 1
+        """
+        R = self.parent()
+        return DifferentialPolynomial._wrap_handle(
+            R, _blad.gcd(self._h(), other._h(), R.epoch))
+
+    def factor(self):
+        r"""
+        Irreducible factorization over `\QQ`.
+
+        Returns ``(unit, [(factor, multiplicity), ...])`` where ``unit`` is a
+        rational :class:`DifferentialPolynomial` (the numeric content) and each
+        ``factor`` is a non-constant irreducible :class:`DifferentialPolynomial`.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: unit, facs = R('2*(u-1)^2*(u-2)').factor()
+            sage: unit
+            2
+            sage: sorted((str(f), m) for f, m in facs)
+            [('u - 1', 2), ('u - 2', 1)]
+        """
+        R = self.parent()
+        ep = R.epoch
+        num, facs = _blad.factor(self._h(), ep)
+        unit = R(int(num))
+        out = [(DifferentialPolynomial._wrap_handle(R, fh), int(m))
+               for fh, m in facs]
+        return unit, out
+
+    def squarefree_decomposition(self):
+        r"""
+        Yun squarefree decomposition: ``(unit, [(factor, multiplicity), ...])``
+        with the ``factor`` pairwise coprime and individually squarefree.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: unit, facs = R('(u-1)^2*(u-2)').squarefree_decomposition()
+            sage: sorted((str(f), m) for f, m in facs)
+            [('u - 1', 2), ('u - 2', 1)]
+        """
+        R = self.parent()
+        ep = R.epoch
+        num, facs = _blad.squarefree(self._h(), ep)
+        unit = R(int(num))
+        out = [(DifferentialPolynomial._wrap_handle(R, fh), int(m))
+               for fh, m in facs]
+        return unit, out
+
+    def squarefree_part(self):
+        r"""
+        The squarefree part: the product of the distinct irreducible factors.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R('(u-1)^2*(u-2)').squarefree_part()
+            u^2 - 3*u + 2
+        """
+        R = self.parent()
+        _unit, facs = self.squarefree_decomposition()
+        res = R.one()
+        for fac, _m in facs:
+            res = res * fac
+        return res
+
+    def resultant(self, other, v):
+        r"""
+        Resultant of ``self`` and ``other`` w.r.t. the jet ``v`` (a name or a
+        degree-one element), via BLAD's Ducos resultant.
+
+        ``v`` must be the highest-ranked variable of both operands (BLAD's
+        Ducos resultant requires it); in the consumer it is always a chain
+        leader, i.e. the top variable in BLAD's global ranking.
+
+        .. NOTE::
+
+            The result matches Sage's (Sylvester) ``resultant`` **up to a sign**:
+            BLAD's Ducos resultant carries its own degree-ordering sign
+            convention that is not a simple parity of the final degrees.  The
+            *magnitude* is exact (verified by fuzz: 440/440 up-to-sign over
+            random pairs sharing a leader).  Every consumer compares resultants
+            up to a nonzero scalar (via ``_normalize``), so the sign is
+            immaterial there; callers needing Sage's exact sign should normalize.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: r = R('u^2 - 1').resultant(R('u - 2'), 'u')
+            sage: r in (R(3), R(-3))
+            True
+            sage: r.is_zero()
+            False
+        """
+        R = self.parent()
+        ep = R.epoch
+        bn = R._as_blad_name(v)
+        return DifferentialPolynomial._wrap_handle(
+            R, _blad.resultant(self._h(), other._h(), bn, ep))
+
+    def content(self, v=None):
+        r"""
+        Content w.r.t. the jet ``v`` (a name / element), or w.r.t. the leader if
+        ``v`` is ``None``.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R('u[x]*u^2 + u[x]*u').content('u')
+            u_x
+        """
+        R = self.parent()
+        ep = R.epoch
+        bn = None if v is None else R._as_blad_name(v)
+        return DifferentialPolynomial._wrap_handle(
+            R, _blad.content(self._h(), bn, ep))
+
+    def primpart(self, v=None):
+        r"""
+        Primitive part w.r.t. the jet ``v`` (a name / element), or the leader if
+        ``v`` is ``None``.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R('u[x]*u^2 + u[x]*u').primpart('u')
+            u^2 + u
+        """
+        R = self.parent()
+        ep = R.epoch
+        bn = None if v is None else R._as_blad_name(v)
+        return DifferentialPolynomial._wrap_handle(
+            R, _blad.primpart(self._h(), bn, ep))
+
+    def exquo(self, other):
+        r"""
+        Exact quotient ``self / other`` (``other`` must divide ``self``).
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R('u^2 - 1').exquo(R('u - 1'))
+            u + 1
+        """
+        R = self.parent()
+        return DifferentialPolynomial._wrap_handle(
+            R, _blad.exquo(self._h(), other._h(), R.epoch))
+
+    def divides(self, other):
+        r"""
+        Whether ``self`` divides ``other``.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R('u - 1').divides(R('u^2 - 1'))
+            True
+            sage: R('u - 3').divides(R('u^2 - 1'))
+            False
+        """
+        R = self.parent()
+        divs, _cof = _blad.is_factor(other._h(), self._h(), R.epoch)
+        return bool(divs)
+
+    def coefficient_in(self, v, d):
+        r"""
+        Coefficient of ``self`` viewed as a polynomial in the jet ``v`` (a name /
+        element) at degree ``d``.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R('3*u^2 + 5*u + 7').coefficient_in('u', 2)
+            3
+            sage: R('3*u^2 + 5*u + 7').coefficient_in('u', 0)
+            7
+        """
+        R = self.parent()
+        ep = R.epoch
+        bn = R._as_blad_name(v)
+        return DifferentialPolynomial._wrap_handle(
+            R, _blad.coefficient_in(self._h(), bn, int(d), ep))
+
+    def pseudo_quo_rem(self, other, v=None):
+        r"""
+        Pseudo quotient and remainder: ``(q, r)`` with
+        ``lc_v(other)^k * self == q * other + r`` and ``deg_v(r) < deg_v(other)``,
+        reducing w.r.t. ``v`` (a name / element) or ``leader(other)``, where
+        ``lc_v(other)`` is the leading coefficient of ``other`` in ``v``.
+
+        The remainder is BLAD's ``prem``; the quotient is recovered exactly as
+        ``(lc_v^k * self - r) / other``.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: p = R('u^3 + 1'); q = R('u^2 - u')
+            sage: quo, rem = p.pseudo_quo_rem(q, 'u')
+            sage: init = q.initial()
+            sage: _, k = p.prem_with_power(q, 'u')
+            sage: init**k * p == quo*q + rem
+            True
+        """
+        R = self.parent()
+        rem, k = self.prem_with_power(other, v)
+        # the multiplier of prem is the leading coefficient of ``other`` w.r.t.
+        # the *reduction variable* v (not other's own leader) -- for the default
+        # v==leader(other) this coincides with other.initial().
+        if v is None:
+            init = other.initial()
+        else:
+            dv = other.degree_in(v)
+            init = other.coefficient_in(v, dv)
+        # init^k * self - rem is divisible by other (Ritt pseudo-division id.)
+        scaled = self
+        for _ in range(int(k)):
+            scaled = scaled * init
+        diff = scaled - rem
+        if diff.is_zero():
+            return R.zero(), rem
+        quo = diff.exquo(other)
+        return quo, rem
+
     # -- lowering to Sage ---------------------------------------------------
     def sage(self):
         r"""

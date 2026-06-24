@@ -344,15 +344,34 @@ cdef extern from *:
         return 0;
     }
 
-    /* resultant of P, Q w.r.t. named variable v: out = expand(resultant). */
+    /* resultant of P, Q w.r.t. named variable v: out = expand(resultant).
+       Ducos requires positive degree in v for both operands.  When either has
+       degree 0 in v we apply the classical degenerate identities, matching
+       Sage's Sylvester resultant:
+         deg_v(Q)=0, Q nonzero:  res = Q^deg_v(P)
+         deg_v(P)=0, P nonzero:  res = P^deg_v(Q)
+         either is zero:         res = 0
+       (when both are degree 0 the first identity gives Q^0 = 1.) */
     static int sdp_resultant(struct bap_polynom_mpz *out,
                              struct bap_polynom_mpz *P, struct bap_polynom_mpz *Q,
                              const char *var, char *err, int n) {
         BA0_TRY {
             struct bav_variable *v = sdp_var(var);
-            struct bap_product_mpz *prod = bap_new_product_mpz();
-            bap_resultant2_Ducos_polynom_mpz(prod, P, Q, v);
-            bap_expand_product_mpz(out, prod);
+            if (bap_is_zero_polynom_mpz(P) || bap_is_zero_polynom_mpz(Q)) {
+                bap_set_polynom_zero_mpz(out);
+            } else {
+                bav_Idegree dP = bap_degree_polynom_mpz(P, v);
+                bav_Idegree dQ = bap_degree_polynom_mpz(Q, v);
+                if (dQ == 0) {
+                    bap_pow_polynom_mpz(out, Q, (bav_Idegree)dP);
+                } else if (dP == 0) {
+                    bap_pow_polynom_mpz(out, P, (bav_Idegree)dQ);
+                } else {
+                    struct bap_product_mpz *prod = bap_new_product_mpz();
+                    bap_resultant2_Ducos_polynom_mpz(prod, P, Q, v);
+                    bap_expand_product_mpz(out, prod);
+                }
+            }
         } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
         return 0;
     }
