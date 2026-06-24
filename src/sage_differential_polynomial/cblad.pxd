@@ -124,6 +124,48 @@ cdef extern from "blad.h":
                               bap_polynom_mpz *, bap_polynom_mpz *,
                               bav_variable *)
 
+    # -- algebraic primitives (Phase A) ------------------------------------
+    bav_Idegree bap_degree_polynom_mpz(bap_polynom_mpz *, bav_variable *)
+    void bap_coeff_polynom_mpz(bap_polynom_mpz *, bap_polynom_mpz *,
+                               bav_variable *, bav_Idegree)
+    bint bap_is_factor_polynom_mpz(bap_polynom_mpz *, bap_polynom_mpz *,
+                                   bap_polynom_mpz *)
+    void bap_exquo_polynom_mpz(bap_polynom_mpz *, bap_polynom_mpz *,
+                               bap_polynom_mpz *)
+    void bap_resultant2_Ducos_polynom_mpz(bap_product_mpz *,
+                                          bap_polynom_mpz *, bap_polynom_mpz *,
+                                          bav_variable *)
+    void bap_nsr2_Ducos_polynom_mpz(bap_polynom_mpz *, bap_polynom_mpz *,
+                                    bap_polynom_mpz *, bap_polynom_mpz *,
+                                    bap_polynom_mpz *, bav_variable *)
+
+    # -- bap_product (factorization / resultant output) --------------------
+    cdef struct bap_power_mpz:
+        bap_polynom_mpz factor
+        bav_Idegree exponent
+    cdef struct bap_product_mpz:
+        mpz_t num_factor
+        ba0_int_p alloc
+        ba0_int_p size
+        bap_power_mpz *tab
+    void bap_init_product_mpz(bap_product_mpz *)
+    bap_product_mpz *bap_new_product_mpz()
+    void bap_expand_product_mpz(bap_polynom_mpz *, bap_product_mpz *)
+
+    # -- baz higher algebra ------------------------------------------------
+    void baz_gcd_polynom_mpz(bap_polynom_mpz *, bap_polynom_mpz *,
+                             bap_polynom_mpz *, bap_polynom_mpz *,
+                             bap_polynom_mpz *)
+    void baz_content_polynom_mpz(bap_polynom_mpz *, bap_polynom_mpz *,
+                                 bav_variable *)
+    void baz_primpart_polynom_mpz(bap_polynom_mpz *, bap_polynom_mpz *,
+                                  bav_variable *)
+    void baz_squarefree_polynom_mpz(bap_product_mpz *, bap_polynom_mpz *)
+    void baz_factor_polynom_mpz(bap_product_mpz *, bap_polynom_mpz *)
+    void baz_gcd_prem_polynom_mpz(bap_polynom_mpz *, bap_product_mpz *,
+                                  bap_polynom_mpz *, bap_polynom_mpz *,
+                                  bav_variable *)
+
     # (polynomials are parsed via ba0_sscanf2(str, "%Az", &poly) and printed
     #  via ba0_new_printf("%Az", &poly); no separate bap_scanf/printf needed)
 

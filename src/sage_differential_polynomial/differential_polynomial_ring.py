@@ -711,8 +711,22 @@ class DifferentialPolynomial(Element):
         p = parent.element_class(parent, "0")
         p._handle = handle
         p._handle_epoch = handle.epoch
-        p._blad_string = handle.to_string()
+        # NB: do NOT stringify here.  The algebraic layer creates millions of
+        # bap intermediates; an eager ``handle.to_string()`` on every wrap is a
+        # per-op stringification tax (the core of the to_blad O(N^2) bug).  The
+        # BLAD string is materialized lazily on demand (_blad_string()) by the
+        # few sites that actually need it (_repr_/__hash__/__reduce__ and the
+        # stale-handle recovery path in _h()).
+        p._blad_string = None
         return p
+
+    def _blad_string_lazy(self):
+        """The durable BLAD string snapshot, computed on demand from the live
+        handle and cached.  Used by repr/hash/pickle and as the cross-epoch
+        recovery representation; NOT computed at wrap time."""
+        if self._blad_string is None:
+            self._blad_string = self._h().to_string()
+        return self._blad_string
 
     # -- jet names ----------------------------------------------------------
     def _jet_names(self):
@@ -731,11 +745,11 @@ class DifferentialPolynomial(Element):
         return self._h().to_string()
 
     def __hash__(self):
-        return hash(self._h().to_string())
+        return hash(self._blad_string_lazy())
 
     def __reduce__(self):
         # serialize via the durable BLAD string snapshot (never the C handle)
-        return (_reconstruct_element, (self.parent(), self._h().to_string()))
+        return (_reconstruct_element, (self.parent(), self._blad_string_lazy()))
 
     def _richcmp_(self, other, op):
         eq = (self._h() == other._h())

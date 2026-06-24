@@ -266,6 +266,146 @@ cdef extern from *:
         BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
         return 0;
     }
+
+    /* ---- algebraic primitives (Phase A) -------------------------------- */
+
+    /* Resolve a named jet variable "u[x,x]" to a bav_variable*.  A NULL var
+       string is returned as NULL (meaning "use leader").  On parse failure the
+       returned pointer may be NULL; callers treat that as an error. */
+    static struct bav_variable *sdp_var(const char *name) {
+        struct bav_variable *v = (struct bav_variable*)0;
+        if (name == (const char*)0) return (struct bav_variable*)0;
+        ba0_sscanf2((char*)name, "%v", &v);
+        return v;
+    }
+
+    /* degree of A in the named variable v. */
+    static int sdp_degree(struct bap_polynom_mpz *A, const char *var,
+                          long *out, char *err, int n) {
+        BA0_TRY {
+            struct bav_variable *v = sdp_var(var);
+            *out = (long)bap_degree_polynom_mpz(A, v);
+        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return 0;
+    }
+
+    /* coefficient of A by (variable v, degree d): out = coeff(A, v^d). */
+    static int sdp_coeff(struct bap_polynom_mpz *out, struct bap_polynom_mpz *A,
+                         const char *var, long d, char *err, int n) {
+        BA0_TRY {
+            struct bav_variable *v = sdp_var(var);
+            bap_coeff_polynom_mpz(out, A, v, (bav_Idegree)d);
+        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return 0;
+    }
+
+    /* exact quotient out = A / B (B must divide A). */
+    static int sdp_exquo(struct bap_polynom_mpz *out, struct bap_polynom_mpz *A,
+                         struct bap_polynom_mpz *B, char *err, int n) {
+        BA0_TRY { bap_exquo_polynom_mpz(out, A, B); }
+        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return 0;
+    }
+
+    /* is B a factor of A?  out_q (may be 0) receives the cofactor. */
+    static int sdp_is_factor(struct bap_polynom_mpz *A, struct bap_polynom_mpz *B,
+                             struct bap_polynom_mpz *out_q, int *res,
+                             char *err, int n) {
+        BA0_TRY { *res = bap_is_factor_polynom_mpz(A, B, out_q) ? 1 : 0; }
+        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return 0;
+    }
+
+    /* gcd of A and B (G); cofA, cofB may be 0 to skip cofactors. */
+    static int sdp_gcd(struct bap_polynom_mpz *G,
+                       struct bap_polynom_mpz *cofA, struct bap_polynom_mpz *cofB,
+                       struct bap_polynom_mpz *A, struct bap_polynom_mpz *B,
+                       char *err, int n) {
+        BA0_TRY { baz_gcd_polynom_mpz(G, cofA, cofB, A, B); }
+        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return 0;
+    }
+
+    /* content / primpart of A w.r.t. named variable v (or leader if NULL). */
+    static int sdp_content(struct bap_polynom_mpz *out, struct bap_polynom_mpz *A,
+                           const char *var, char *err, int n) {
+        BA0_TRY {
+            struct bav_variable *v = sdp_var(var);
+            baz_content_polynom_mpz(out, A, v);
+        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return 0;
+    }
+    static int sdp_primpart(struct bap_polynom_mpz *out, struct bap_polynom_mpz *A,
+                            const char *var, char *err, int n) {
+        BA0_TRY {
+            struct bav_variable *v = sdp_var(var);
+            baz_primpart_polynom_mpz(out, A, v);
+        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return 0;
+    }
+
+    /* resultant of P, Q w.r.t. named variable v: out = expand(resultant). */
+    static int sdp_resultant(struct bap_polynom_mpz *out,
+                             struct bap_polynom_mpz *P, struct bap_polynom_mpz *Q,
+                             const char *var, char *err, int n) {
+        BA0_TRY {
+            struct bav_variable *v = sdp_var(var);
+            struct bap_product_mpz *prod = bap_new_product_mpz();
+            bap_resultant2_Ducos_polynom_mpz(prod, P, Q, v);
+            bap_expand_product_mpz(out, prod);
+        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return 0;
+    }
+
+    /* gcd-controlled pseudo-remainder (swell control): R = gcd_prem(A, B, v).
+       H (the multiplier product) is discarded here; *hexp returns the total
+       degree of H (sum of exponents) as a convenience power signal. */
+    static int sdp_gcd_prem(struct bap_polynom_mpz *R, struct bap_polynom_mpz *A,
+                            struct bap_polynom_mpz *B, const char *var,
+                            long *hexp, char *err, int n) {
+        BA0_TRY {
+            struct bav_variable *v = sdp_var(var);
+            if (v == (struct bav_variable*)0) v = bap_leader_polynom_mpz(B);
+            struct bap_product_mpz *H = bap_new_product_mpz();
+            baz_gcd_prem_polynom_mpz(R, H, A, B, v);
+            long e = 0; long i;
+            for (i = 0; i < H->size; i++) e += (long)H->tab[i].exponent;
+            *hexp = e;
+        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return 0;
+    }
+
+    /* ---- product walks (factor / squarefree) --------------------------- */
+    /* Compute the squarefree / irreducible factorization product into a
+       caller-owned product, then expose its size, numeric factor, and per-factor
+       (poly, exponent) so Cython can read them out without holding the product
+       struct in .pyx. */
+    static struct bap_product_mpz *sdp_factor(struct bap_polynom_mpz *A,
+                                              int squarefree_only,
+                                              char *err, int n) {
+        struct bap_product_mpz *prod = (struct bap_product_mpz*)0;
+        BA0_TRY {
+            prod = bap_new_product_mpz();
+            if (squarefree_only)
+                baz_squarefree_polynom_mpz(prod, A);
+            else
+                baz_factor_polynom_mpz(prod, A);
+        } BA0_CATCH { sdp_copymsg(err, n); return (struct bap_product_mpz*)0; } BA0_ENDTRY;
+        return prod;
+    }
+    static long sdp_product_size(struct bap_product_mpz *p) {
+        return (long)p->size;
+    }
+    static mpz_ptr sdp_product_numfactor(struct bap_product_mpz *p) {
+        return (mpz_ptr)(p->num_factor);
+    }
+    static struct bap_polynom_mpz *sdp_product_factor(struct bap_product_mpz *p,
+                                                      long i) {
+        return &p->tab[i].factor;
+    }
+    static long sdp_product_exponent(struct bap_product_mpz *p, long i) {
+        return (long)p->tab[i].exponent;
+    }
     """
     int sdp_init(char *, int)
     int sdp_install_ranking(const char *, char *, int)
@@ -286,6 +426,21 @@ cdef extern from *:
     int sdp_sub(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, char *, int)
     int sdp_mul(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, char *, int)
     int sdp_neg(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, char *, int)
+    # Phase A algebraic primitives
+    int sdp_degree(cb.bap_polynom_mpz *, const char *, long *, char *, int)
+    int sdp_coeff(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, const char *, long, char *, int)
+    int sdp_exquo(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, char *, int)
+    int sdp_is_factor(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, int *, char *, int)
+    int sdp_gcd(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, char *, int)
+    int sdp_content(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, const char *, char *, int)
+    int sdp_primpart(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, const char *, char *, int)
+    int sdp_resultant(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, const char *, char *, int)
+    int sdp_gcd_prem(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, const char *, long *, char *, int)
+    cb.bap_product_mpz *sdp_factor(cb.bap_polynom_mpz *, int, char *, int)
+    long sdp_product_size(cb.bap_product_mpz *)
+    mpz_ptr sdp_product_numfactor(cb.bap_product_mpz *)
+    cb.bap_polynom_mpz *sdp_product_factor(cb.bap_product_mpz *, long)
+    long sdp_product_exponent(cb.bap_product_mpz *, long)
 
 
 DEF ERRBUF = 1024
@@ -768,3 +923,179 @@ def neg(PolyHandle a, long epoch):
     if sdp_neg(out, a.ptr, err, ERRBUF) != 0:
         raise BladError(err.decode("utf-8", "replace"))
     return PolyHandle._wrap(out, epoch)
+
+
+# ---------------------------------------------------------------------------
+# Algebraic primitives (Phase A): gcd, factor, squarefree, content/primpart,
+# resultant, exact division, degree/coefficient by variable, gcd-prem.
+#
+# A "var" argument is a BLAD jet *name string* (e.g. "u[x,x]") or None (meaning
+# the leader of the relevant polynomial); the high-level layer resolves a Sage
+# name / degree-1 element to that string before calling here.
+# ---------------------------------------------------------------------------
+
+cdef inline cb.bap_polynom_mpz *_fresh(char *err) except NULL:
+    cdef cb.bap_polynom_mpz *p = sdp_new_poly(err, ERRBUF)
+    if p == NULL:
+        raise BladError(err.decode("utf-8", "replace"))
+    return p
+
+
+def degree_in(PolyHandle a, var):
+    """Degree of ``a`` in the named jet variable ``var`` (a BLAD name string)."""
+    cdef char err[ERRBUF]
+    err[0] = 0
+    cdef bytes vb
+    cdef long out = 0
+    if var is None:
+        raise ValueError("degree_in needs a variable name")
+    vb = var.encode("utf-8")
+    if sdp_degree(a.ptr, vb, &out, err, ERRBUF) != 0:
+        raise BladError(err.decode("utf-8", "replace"))
+    return int(out)
+
+
+def coefficient_in(PolyHandle a, var, long d, long epoch):
+    """Coefficient of ``a`` viewed in ``var`` at degree ``d`` (BLAD name)."""
+    cdef char err[ERRBUF]
+    err[0] = 0
+    cdef cb.bap_polynom_mpz *out = _fresh(err)
+    cdef bytes vb
+    if var is None:
+        raise ValueError("coefficient_in needs a variable name")
+    vb = var.encode("utf-8")
+    if sdp_coeff(out, a.ptr, vb, d, err, ERRBUF) != 0:
+        raise BladError(err.decode("utf-8", "replace"))
+    return PolyHandle._wrap(out, epoch)
+
+
+def exquo(PolyHandle a, PolyHandle b, long epoch):
+    """Exact quotient ``a / b`` (``b`` must divide ``a``)."""
+    cdef char err[ERRBUF]
+    err[0] = 0
+    cdef cb.bap_polynom_mpz *out = _fresh(err)
+    if sdp_exquo(out, a.ptr, b.ptr, err, ERRBUF) != 0:
+        raise BladError(err.decode("utf-8", "replace"))
+    return PolyHandle._wrap(out, epoch)
+
+
+def is_factor(PolyHandle a, PolyHandle b, long epoch):
+    """Return ``(divides, cofactor)``: True iff ``b`` divides ``a``, with the
+    exact cofactor ``a/b`` when it does (the cofactor handle is meaningful only
+    when ``divides`` is True)."""
+    cdef char err[ERRBUF]
+    err[0] = 0
+    cdef cb.bap_polynom_mpz *q = _fresh(err)
+    cdef int res = 0
+    if sdp_is_factor(a.ptr, b.ptr, q, &res, err, ERRBUF) != 0:
+        raise BladError(err.decode("utf-8", "replace"))
+    return bool(res), PolyHandle._wrap(q, epoch)
+
+
+def gcd(PolyHandle a, PolyHandle b, long epoch):
+    """Greatest common divisor of ``a`` and ``b``."""
+    cdef char err[ERRBUF]
+    err[0] = 0
+    cdef cb.bap_polynom_mpz *g = _fresh(err)
+    if sdp_gcd(g, NULL, NULL, a.ptr, b.ptr, err, ERRBUF) != 0:
+        raise BladError(err.decode("utf-8", "replace"))
+    return PolyHandle._wrap(g, epoch)
+
+
+def content(PolyHandle a, var, long epoch):
+    """Content of ``a`` w.r.t. ``var`` (BLAD name) or its leader if ``var`` is
+    None."""
+    cdef char err[ERRBUF]
+    err[0] = 0
+    cdef cb.bap_polynom_mpz *out = _fresh(err)
+    cdef bytes vb
+    if var is None:
+        if sdp_content(out, a.ptr, NULL, err, ERRBUF) != 0:
+            raise BladError(err.decode("utf-8", "replace"))
+    else:
+        vb = var.encode("utf-8")
+        if sdp_content(out, a.ptr, vb, err, ERRBUF) != 0:
+            raise BladError(err.decode("utf-8", "replace"))
+    return PolyHandle._wrap(out, epoch)
+
+
+def primpart(PolyHandle a, var, long epoch):
+    """Primitive part of ``a`` w.r.t. ``var`` (BLAD name) or its leader."""
+    cdef char err[ERRBUF]
+    err[0] = 0
+    cdef cb.bap_polynom_mpz *out = _fresh(err)
+    cdef bytes vb
+    if var is None:
+        if sdp_primpart(out, a.ptr, NULL, err, ERRBUF) != 0:
+            raise BladError(err.decode("utf-8", "replace"))
+    else:
+        vb = var.encode("utf-8")
+        if sdp_primpart(out, a.ptr, vb, err, ERRBUF) != 0:
+            raise BladError(err.decode("utf-8", "replace"))
+    return PolyHandle._wrap(out, epoch)
+
+
+def resultant(PolyHandle a, PolyHandle b, var, long epoch):
+    """Resultant of ``a`` and ``b`` w.r.t. ``var`` (a BLAD name string)."""
+    cdef char err[ERRBUF]
+    err[0] = 0
+    cdef cb.bap_polynom_mpz *out = _fresh(err)
+    cdef bytes vb
+    if var is None:
+        raise ValueError("resultant needs a variable name")
+    vb = var.encode("utf-8")
+    if sdp_resultant(out, a.ptr, b.ptr, vb, err, ERRBUF) != 0:
+        raise BladError(err.decode("utf-8", "replace"))
+    return PolyHandle._wrap(out, epoch)
+
+
+def gcd_prem(PolyHandle a, PolyHandle b, var, long epoch):
+    """Swell-controlled pseudo-remainder of ``a`` by ``b`` w.r.t. ``var`` (BLAD
+    name) or ``leader(b)``.  Returns ``(remainder, hexp)`` where ``hexp`` is the
+    total exponent of the multiplier product (a coarse power signal)."""
+    cdef char err[ERRBUF]
+    err[0] = 0
+    cdef cb.bap_polynom_mpz *out = _fresh(err)
+    cdef long hexp = 0
+    cdef bytes vb
+    if var is None:
+        if sdp_gcd_prem(out, a.ptr, b.ptr, NULL, &hexp, err, ERRBUF) != 0:
+            raise BladError(err.decode("utf-8", "replace"))
+    else:
+        vb = var.encode("utf-8")
+        if sdp_gcd_prem(out, a.ptr, b.ptr, vb, &hexp, err, ERRBUF) != 0:
+            raise BladError(err.decode("utf-8", "replace"))
+    return PolyHandle._wrap(out, epoch), int(hexp)
+
+
+def _factor_walk(PolyHandle a, int squarefree_only, long epoch):
+    """Walk a factorization/squarefree product, returning
+    ``(num_factor:int, [(PolyHandle, exponent), ...])``.  Constant / numeric-only
+    factors are excluded (the product's numeric part is returned separately)."""
+    cdef char err[ERRBUF]
+    err[0] = 0
+    cdef cb.bap_product_mpz *prod = sdp_factor(a.ptr, squarefree_only, err, ERRBUF)
+    if prod == NULL:
+        raise BladError(err.decode("utf-8", "replace"))
+    cdef long sz = sdp_product_size(prod)
+    cdef long i, e
+    cdef cb.bap_polynom_mpz *fac
+    num = _mpz_to_pyint(<mpz_srcptr> sdp_product_numfactor(prod))
+    out = []
+    for i in range(sz):
+        fac = sdp_product_factor(prod, i)
+        e = sdp_product_exponent(prod, i)
+        # wrap a fresh copy-free handle onto the factor pointer (it lives on the
+        # BLAD stack for the current epoch, like every other handle here)
+        out.append((PolyHandle._wrap(fac, epoch), int(e)))
+    return int(num), out
+
+
+def factor(PolyHandle a, long epoch):
+    """Irreducible factorization: ``(num_factor:int, [(PolyHandle, mult), ...])``."""
+    return _factor_walk(a, 0, epoch)
+
+
+def squarefree(PolyHandle a, long epoch):
+    """Yun squarefree decomposition: ``(num_factor:int, [(PolyHandle, mult), ...])``."""
+    return _factor_walk(a, 1, epoch)
