@@ -195,7 +195,14 @@ class DifferentialPolynomialRing(UniqueRepresentation, Parent):
             return
         cls._global_epoch += 1
         self._epoch = cls._global_epoch
-        _blad.install_ranking(self._rank_string)
+        try:
+            _blad.install_ranking(self._rank_string)
+        except _blad.BladError as exc:
+            raise RuntimeError(
+                "v1 supports a single live DifferentialPolynomialRing at a time "
+                "(BLAD has one global differential ring); a different ring is "
+                "already installed.  Lower all elements to their Sage form "
+                "before switching rings.  BLAD said: %s" % exc)
         cls._installed = self
 
     @property
