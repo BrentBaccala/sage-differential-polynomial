@@ -611,6 +611,237 @@ class DifferentialPolynomialRing(UniqueRepresentation, Parent):
         _theta, _base = self.factor_derivative(name)
         return {d: m for d, m in _theta}
 
+    # ======================================================================
+    # Phase D: the ``regularchains.ring.Ring`` interface (dual-substrate).
+    #
+    # The shared Layer-0 algebraic engine (``triade``/``thomas``/``polyutil``/
+    # ``chaintools``) threads a ``ring`` object through every function and
+    # resolves all ranking ops as ``ring.<op>(p)`` (Maple style).  Giving
+    # ``DifferentialPolynomialRing`` the same interface as
+    # ``regularchains.ring.Ring`` lets the engine run *directly* on ``bap``
+    # ``DifferentialPolynomial`` elements -- no jet ``_Shadow`` / ``to_sage`` /
+    # ``to_blad`` round-trip.  The engine code is byte-unchanged; only this
+    # interface and the element-method surface below adapt.
+    #
+    # **Field-param fidelity (the load-bearing seam).**  RegularChains' ``mvar``
+    # is the highest-ranked appearing *unknown* -- a variable that is neither a
+    # derivation (coordinate) nor a parameter.  BLAD's ``leader`` ranks
+    # parameters/coordinates *as* variables, so ``leader`` and ``mvar`` DIVERGE
+    # on a pure parameter / coordinate relation: ``leader('a^2-3') == 'a'`` but
+    # ``mvar('a^2-3') is None`` (the derivations + parameters are the "field
+    # params" the decomposition must never case-split on).  ``init``/``tail``/
+    # ``mvar_name`` are therefore taken w.r.t. ``mvar``, NOT ``leader``.
+    # ======================================================================
+
+    @property
+    def R(self):
+        """The polynomial-ring object the engine coerces through.
+
+        For the dual-substrate path the ring *is* its own ``.R``: the engine's
+        ``ring.R(p)`` / ``ring.R(0)`` calls coerce through this ring's element
+        constructor, producing :class:`DifferentialPolynomial` elements (the
+        ``bap`` substrate), exactly where a Sage ``Ring`` would return Sage
+        ``MPolynomial`` elements.
+        """
+        return self
+
+    @property
+    def param_field(self):
+        """Whether declared :meth:`parameters` are treated as base-field
+        constants (never case-split; the default) or as ranked *unknowns* (the
+        ``param_field=False`` / parametric-split mode).
+
+        The dual-substrate Layer-0 engine reads this through
+        :attr:`field_params` / :meth:`is_param` / :meth:`mvar_name`.  The
+        diff-Thomas driver sets it per decomposition (it is not part of the
+        ring's identity, so it is a plain mutable flag, safe because v1 runs one
+        decomposition at a time).  Default ``True`` (parameters are field
+        constants -- the Maple ``field_of_constants`` convention)."""
+        return getattr(self, "_param_field", True)
+
+    @param_field.setter
+    def param_field(self, value):
+        self._param_field = bool(value)
+
+    @property
+    def field_params(self):
+        """The unranked base-field generators the decomposition never case-splits
+        on -- the RegularChains ``field_params``.
+
+        Always includes the derivations (coordinates).  Includes the declared
+        :meth:`parameters` ONLY in :attr:`param_field` mode (the default); in the
+        ``param_field=False`` parametric-split mode the parameters are ranked
+        unknowns (case-splittable) and so are NOT field params.
+        """
+        fp = list(self._derivations)
+        if self.param_field:
+            fp += list(self._parameters)
+        return fp
+
+    @property
+    def params(self):
+        """The parameter names (a subset of :attr:`field_params`)."""
+        return list(self._parameters)
+
+    @property
+    def char(self):
+        """The characteristic (always 0 in v1)."""
+        return ZZ(0)
+
+    @property
+    def order(self):
+        """The ranked variable list, highest rank first.
+
+        Peripheral on the differential path: the *core* ``triangularize`` /
+        ``intersect`` / ``regular_gcd`` / split-by-squarefree engine never reads
+        ``ring.order`` (only the counting / dimension / debug features do, which
+        the diff-Thomas path does not exercise -- see the Phase-D audit).  A
+        ``DifferentialPolynomialRing`` has an *infinite* jet alphabet, so no
+        finite total ``order`` exists; we return the finite generating set in
+        ranking order (derivations rank below indeterminates), which is a sound
+        upper part for those peripheral readers and is never consulted by the
+        core.
+        """
+        names = list(self._indeterminates) + list(self._parameters) \
+            + list(self._derivations)
+        return self.sort(names, "descending")
+
+    def rank_of(self, vname):
+        """Rank index of a variable as an INTEGER, smaller == higher rank
+        (matching ``regularchains.ring.Ring.rank_of`` where 0 is the top rank).
+
+        The engine both *compares* rank indices (``chain.under`` / ``chain.upper``
+        use ``<`` / ``>``) and *negates* them (``-ring.rank_of(...)`` as a sort
+        key), so a plain integer is required -- not the ``_ranking_key`` tuple.
+        We encode the BLAD ranking key ``(block_idx, -order, head_pos, name)``
+        into a single monotonic non-negative integer that preserves the tuple's
+        order: a higher differentiation order or an earlier block yields a
+        smaller integer (higher rank).  The encoding is order-preserving for any
+        runtime jet (order / head position bounded by the polynomials in hand).
+        """
+        block_idx, neg_order, head_pos, _name = \
+            self._ranking_key(self._as_blad_name(vname))
+        _B = 10 ** 6
+        # neg_order = -order, so smaller neg_order == higher order == higher rank.
+        # Shift each field into a positive monotonic slot (smaller == higher rank).
+        return ((block_idx * _B + (neg_order + _B)) * _B + head_pos)
+
+    def is_param(self, vname):
+        """True iff ``vname`` is a field param -- a derivation, or (in
+        :attr:`param_field` mode) a declared parameter -- i.e. an unranked
+        base-field generator the decomposition never case-splits on."""
+        head = str(vname).split("[", 1)[0]
+        return head in set(self.field_params)
+
+    def _is_field_param_name(self, blad_name):
+        head = blad_name.split("[", 1)[0]
+        return head in set(self.field_params)
+
+    def mvar(self, p):
+        """The main variable of ``p``: the highest-ranked appearing *unknown*
+        jet (an indeterminate derivative), as a degree-one
+        :class:`DifferentialPolynomial`, or ``None`` when only field params
+        (derivations / parameters) appear.
+
+        Differs from :meth:`DifferentialPolynomial.leader` (which ranks params
+        and coordinates too): a pure parameter / coordinate relation has NO
+        ``mvar`` -- it is constant w.r.t. the ranking.  See the class docstring
+        for the field-param contract.
+        """
+        nm = self.mvar_name(p)
+        return None if nm is None else self(nm)
+
+    def mvar_name(self, p):
+        """The main-variable NAME of ``p`` (field-param-aware), or ``None``.
+
+        The highest-ranked appearing name that is NOT a derivation or parameter.
+        ``None`` when ``p`` is a base constant or involves only field params.
+        """
+        p = self(p) if not isinstance(p, DifferentialPolynomial) else p
+        names = [nm for nm in p._jet_names()
+                 if not self._is_field_param_name(nm)]
+        if not names:
+            return None
+        return self.sort(names, "descending")[0]
+
+    def gen(self, name):  # noqa: F811  (override the finite-gen accessor)
+        """Return the ``bap`` generator (a degree-one element) for ``name``.
+
+        Overrides the finite-generating-set :meth:`gen` so the engine's
+        ``ring.gen(v)`` -- where ``v`` is any appearing jet name, including
+        prolongations not in the finite generating set -- returns the
+        degree-one element the element methods accept (vs. the finite-gen guard
+        that rejects unlisted jet names).
+        """
+        return self(self._as_blad_name(name))
+
+    def init(self, p, v=None):
+        """Initial of ``p`` w.r.t. its :meth:`mvar` (field-param-aware) -- the
+        coefficient of the highest power of the main *unknown* variable.
+
+        ``v`` may be given to take the initial w.r.t. a specific variable.
+        Distinct from :meth:`DifferentialPolynomial.initial` (which uses BLAD's
+        ``leader``, params included): on a pure-param relation
+        ``init('a^2-3')`` returns ``a^2-3`` itself (no unknown to peel), whereas
+        ``initial`` would peel the param ``a``.
+        """
+        p = self(p) if not isinstance(p, DifferentialPolynomial) else p
+        if v is None:
+            v = self.mvar_name(p)
+        if v is None:
+            return p                      # constant w.r.t. the ranking
+        d = p.degree_in(v)
+        return p.coefficient_in(v, d)
+
+    def tail(self, p, v=None):
+        """Reductum ``p - init(p)*v**deg`` w.r.t. :meth:`mvar` (field-param-aware).
+        """
+        p = self(p) if not isinstance(p, DifferentialPolynomial) else p
+        if v is None:
+            v = self.mvar_name(p)
+        if v is None:
+            return self.zero()
+        d = p.degree_in(v)
+        ini = p.coefficient_in(v, d)
+        g = self(self._as_blad_name(v))
+        lead = self.one()
+        for _ in range(d):
+            lead = lead * g
+        return p - ini * lead
+
+    def degree_in(self, p, v):
+        """Degree of ``p`` in the variable ``v`` (RegularChains ``ring.degree_in``)."""
+        p = self(p) if not isinstance(p, DifferentialPolynomial) else p
+        return p.degree_in(v)
+
+    def mdeg(self, p, v=None):
+        """Degree of ``p`` w.r.t. its :meth:`mvar` (field-param-aware), or 0 for
+        a constant / pure-field-param polynomial."""
+        p = self(p) if not isinstance(p, DifferentialPolynomial) else p
+        if v is None:
+            v = self.mvar_name(p)
+        if v is None:
+            return ZZ(0)
+        return ZZ(p.degree_in(v))
+
+    def monomial(self, *exps):
+        """Construct the monomial ``prod gen_i ** exps_i`` over the FINITE
+        generating set, mirroring ``MPolynomialRing.monomial``.  Used only by
+        the (peripheral) field-param-content stripper; the differential path's
+        own stripper is BLAD-native."""
+        gens = self.gens()
+        if len(exps) != len(gens):
+            raise ValueError("monomial expects one exponent per generator")
+        mon = self.one()
+        for g, e in zip(gens, exps):
+            for _ in range(int(e)):
+                mon = mon * g
+        return mon
+
+    def base_ring(self):
+        """The coefficient field (``QQ`` in v1)."""
+        return self._base
+
 
 # ---------------------------------------------------------------------------
 # Element
@@ -1099,29 +1330,34 @@ class DifferentialPolynomial(Element):
 
     def factor(self):
         r"""
-        Irreducible factorization over `\QQ`.
+        Irreducible factorization over `\QQ`, as a Sage
+        :class:`~sage.structure.factorization.Factorization`.
 
-        Returns ``(unit, [(factor, multiplicity), ...])`` where ``unit`` is a
-        rational :class:`DifferentialPolynomial` (the numeric content) and each
-        ``factor`` is a non-constant irreducible :class:`DifferentialPolynomial`.
+        The returned object iterates as ``(factor, multiplicity)`` pairs (each
+        ``factor`` a non-constant irreducible :class:`DifferentialPolynomial`)
+        and carries the numeric content as its :meth:`~sage.structure.factorization.Factorization.unit`
+        -- matching Sage ``MPolynomial.factor`` so the shared Layer-0 engine's
+        ``for fac, _ in p.factor()`` idiom works unchanged on the ``bap``
+        substrate.
 
         EXAMPLES::
 
             sage: from sage_differential_polynomial import DifferentialPolynomialRing
             sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
-            sage: unit, facs = R('2*(u-1)^2*(u-2)').factor()
-            sage: unit
+            sage: F = R('2*(u-1)^2*(u-2)').factor()
+            sage: F.unit()
             2
-            sage: sorted((str(f), m) for f, m in facs)
+            sage: sorted((str(f), m) for f, m in F)
             [('u - 1', 2), ('u - 2', 1)]
         """
+        from sage.structure.factorization import Factorization
         R = self.parent()
         ep = R.epoch
         num, facs = _blad.factor(self._h(), ep)
         unit = R(int(num))
         out = [(DifferentialPolynomial._wrap_handle(R, fh), int(m))
                for fh, m in facs]
-        return unit, out
+        return Factorization(out, unit=unit)
 
     def squarefree_decomposition(self):
         r"""
@@ -1355,6 +1591,217 @@ class DifferentialPolynomial(Element):
             return R.zero(), rem
         quo = diff.exquo(other)
         return quo, rem
+
+    # ======================================================================
+    # Phase D: Sage-MPolynomial element idioms (dual-substrate).
+    #
+    # The shared Layer-0 engine calls these on the polynomials flowing through
+    # ``triangularize`` / ``intersect`` / ``regular_gcd``.  Each is answered in
+    # ``bap``-native terms (NOT via the ``__getattr__`` -> ``sage()`` jet-shadow
+    # fallback, which would silently switch ranking / field-param semantics and
+    # break the field-param-aware ``mvar``).  The variable argument ``g`` may be
+    # a name string or a degree-one :class:`DifferentialPolynomial` (what
+    # ``ring.gen(v)`` returns).
+    # ======================================================================
+
+    def is_constant(self):
+        r"""
+        Whether ``self`` is a base constant (a rational): NO appearing name at
+        all -- not even a field param.
+
+        .. NOTE::
+
+            This is the *base-field* constant test, matching a Sage
+            ``MPolynomial.is_constant`` over the full ring ``QQ[all vars]``: a
+            pure field-param polynomial (``a^2 - 3``) is NOT constant here (it
+            has an appearing name ``a``), even though it has no :meth:`mvar`.
+            The ranking-aware "constant w.r.t. the ranking" test the engine
+            needs is ``ring.mvar(p) is None`` (``polyutil.is_constant``), which
+            consults :meth:`DifferentialPolynomialRing.mvar`.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R('5').is_constant()
+            True
+            sage: R('u - 1').is_constant()
+            False
+        """
+        return not self._jet_names()
+
+    def degree(self, g=None):
+        r"""
+        Degree of ``self`` in the variable ``g`` (a name / degree-one element).
+        With ``g=None``, the total degree.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: p = R('u[x]^3 + 3*u[x] - 5')
+            sage: p.degree('u[x]')
+            3
+            sage: p.degree(R('u[x]'))
+            3
+        """
+        if g is None:
+            best = 0
+            for _c, term in _blad.read_terms(self._h()):
+                tot = sum(int(d) for _nm, d in term)
+                if tot > best:
+                    best = tot
+            return int(best)
+        return self.degree_in(g)
+
+    def coefficient(self, arg):
+        r"""
+        Coefficient extraction in the Sage ``{var: degree}`` dict idiom.
+
+        ``p.coefficient({g: d})`` returns the coefficient of ``g**d`` in ``p``
+        (viewing the other variables as parameters), matching
+        :meth:`coefficient_in`.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: p = R('3*u^2 + 5*u + 7')
+            sage: p.coefficient({R('u'): 2})
+            3
+            sage: p.coefficient({'u': 0})
+            7
+        """
+        if isinstance(arg, dict):
+            if len(arg) != 1:
+                raise NotImplementedError(
+                    "coefficient supports a single {var: degree} entry")
+            (v, d), = arg.items()
+            return self.coefficient_in(v, int(d))
+        raise NotImplementedError("coefficient expects a {var: degree} dict")
+
+    def derivative(self, g):
+        r"""
+        ALGEBRAIC partial derivative ``d(self)/dg`` w.r.t. the single jet ``g``
+        (treating every other jet as independent) -- NOT the total/differential
+        derivative :meth:`differentiate`.
+
+        This is the ``MPolynomial.derivative(var)`` the engine calls when
+        forming a separant / discriminant ``d p / d (leader)`` algebraically.
+        Implemented as ``sum_{k>=1} k * coeff_k(g) * g**(k-1)``.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R('u[x]^3 + 3*u[x] - 5').derivative('u[x]')
+            3*u_x^2 + 3
+            sage: R('u[x]^2*u + u').derivative('u')
+            u_x^2 + 1
+        """
+        R = self.parent()
+        d = self.degree_in(g)
+        if d == 0:
+            return R.zero()
+        gel = R(R._as_blad_name(g))
+        res = R.zero()
+        gpow = R.one()              # g**(k-1)
+        for k in range(1, d + 1):
+            ck = self.coefficient_in(g, k)
+            res = res + R(int(k)) * ck * gpow
+            gpow = gpow * gel
+        return res
+
+    def lc(self):
+        r"""
+        The leading coefficient: the numeric (rational) content's sign-carrying
+        leading numeric coefficient in BLAD canonical order -- a base constant.
+
+        For the engine's :func:`_normalize` this only needs to (a) be a base
+        constant exactly when ``self``'s leading term is field-param-free, and
+        (b) carry the right sign.  We return the integer coefficient of the
+        first (leading) term as a :class:`DifferentialPolynomial` constant.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: R('3*u^2 + 5*u + 7').lc()
+            3
+        """
+        R = self.parent()
+        terms = list(_blad.read_terms(self._h()))
+        if not terms:
+            return R.zero()
+        return R(int(terms[0][0]))
+
+    def variables(self):
+        r"""
+        The appearing variables as degree-one :class:`DifferentialPolynomial`
+        elements, in ranking order (highest first) -- mirroring
+        ``MPolynomial.variables``.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: [str(v) for v in R('u[x]*u + u').variables()]
+            ['u_x', 'u']
+        """
+        R = self.parent()
+        names = R.sort(list(self._jet_names()), "descending")
+        return [R(nm) for nm in names]
+
+    def dict(self):
+        r"""
+        The ``{exponent-tuple: coefficient}`` dict over the FINITE generating
+        set (mirroring ``MPolynomial.dict``).
+
+        Only meaningful when every appearing name is a finite generator (a head
+        or a field param); a jet/prolongation outside the finite set raises.
+        Used by the (peripheral) field-param-content stripper.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: sorted(R('3*u^2 + 5').dict().items())
+            [((0, 0), 5), ((0, 2), 3)]
+        """
+        R = self.parent()
+        names = R._all_finite_names()
+        pos = {nm: i for i, nm in enumerate(names)}
+        ng = len(names)
+        out = {}
+        for coeff, term in _blad.read_terms(self._h()):
+            exps = [0] * ng
+            for nm, deg in term:
+                if nm not in pos:
+                    raise KeyError(
+                        "dict() over the finite generating set, but %r is not "
+                        "a finite generator" % (nm,))
+                exps[pos[nm]] += int(deg)
+            key = tuple(exps)
+            c = QQ(coeff)
+            out[key] = out.get(key, QQ(0)) + c
+        return out
+
+    def __floordiv__(self, other):
+        r"""
+        Exact division ``self // other`` for the engine's ``p // content`` idiom
+        (the field-param-content stripper divides by an exact factor).
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: (R('u^2 - 1') // R('u - 1'))
+            u + 1
+        """
+        R = self.parent()
+        if not isinstance(other, DifferentialPolynomial):
+            other = R(other)
+        return self.exquo(other)
 
     # -- lowering to Sage ---------------------------------------------------
     def sage(self):
