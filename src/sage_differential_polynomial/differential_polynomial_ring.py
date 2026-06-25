@@ -1052,6 +1052,35 @@ class DifferentialPolynomial(Element):
         h, hpow = _blad.prem(self._h(), other._h(), ep, v)
         return DifferentialPolynomial._wrap_handle(R, h), int(hpow)
 
+    def gcd_prem(self, other, v=None):
+        r"""
+        Swell-controlled (gcd-aware) pseudo-remainder of ``self`` by ``other``
+        w.r.t. ``other.leader()`` (unless ``v`` is given).
+
+        Unlike :meth:`prem`, this divides out gcd content during pseudo-division
+        (BLAD ``baz_gcd_prem_polynom_mpz``) -- the same mechanism BLAD's own
+        Rosenfeld-Groebner uses to keep coefficient/term swell under control.
+        The remainder differs from :meth:`prem`'s by a content/unit factor, so
+        the two agree up to a nonzero unit.
+
+        Returns ``(remainder, hexp)`` where ``hexp`` is a coarse exponent signal
+        for the multiplier product.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: p = R('u[x,x]^2 + 3*u[x] - 5'); q = R('u[x,x] - u')
+            sage: r, h = p.gcd_prem(q); r.is_zero()
+            False
+        """
+        R = self.parent()
+        ep = R.epoch
+        if v is not None:
+            v = sage_to_blad_name(str(v), R._heads(), set(R._derivations))
+        h, hexp = _blad.gcd_prem(self._h(), other._h(), v, ep)
+        return DifferentialPolynomial._wrap_handle(R, h), int(hexp)
+
     # -- algebraic primitives (Phase B; thin delegates to BLAD baz/bap) -----
     def gcd(self, other):
         r"""
