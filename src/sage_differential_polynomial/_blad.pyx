@@ -394,6 +394,117 @@ cdef extern from *:
         return 0;
     }
 
+    /* ---- subresultant polynomial chain --------------------------------- */
+    /* Run Lionel Ducos' subresultant PRS (the loop of bap_resultant2_Ducos /
+       algo_new) and collect EVERY intermediate subresultant produced -- the
+       running B (= S_{d-1}) and Z (= S_e) polynomials -- into the caller's
+       array, paired with each one's degree in v.  out[i] is a fresh
+       bap_polynom_mpz* (BLAD-stack), deg[i] its degree in v.  Returns the count
+       (<= cap) via *count, or -1 (with err set) on a BLAD exception or overflow.
+
+       v must be the highest-ranked variable of both operands (Ducos
+       constraint), exactly as for sdp_resultant.  The resultant S_0 is included
+       as a degree-0 entry; degenerate degrees (deg_v(P)==0 or deg_v(Q)==0) are
+       handled with the classical identities so the chain is never empty.
+
+       The caller post-processes into a {degree -> poly} dict, keeping the
+       lowest-index entry per degree (the subresultant of that degree). */
+    static int sdp_subres_chain(struct bap_polynom_mpz **out, long *deg,
+                                long cap, long *count,
+                                struct bap_polynom_mpz *P0,
+                                struct bap_polynom_mpz *Q0,
+                                const char *var, char *err, int n) {
+        BA0_TRY {
+            struct bav_variable *v = sdp_var(var);
+            long k = 0;
+            struct bap_polynom_mpz *P = P0, *Q = Q0;
+            if (bap_is_zero_polynom_mpz(P) || bap_is_zero_polynom_mpz(Q)) {
+                *count = 0;
+            } else {
+                bav_Idegree dP = bap_degree_polynom_mpz(P, v);
+                bav_Idegree dQ = bap_degree_polynom_mpz(Q, v);
+                /* keep P the higher-degree operand (mirror algo_new's swap) */
+                if (dP < dQ) {
+                    struct bap_polynom_mpz *t = P; P = Q; Q = t;
+                    bav_Idegree td = dP; dP = dQ; dQ = td;
+                }
+                if (dQ == 0) {
+                    /* res = Q^dP (degenerate); only S_0 exists. */
+                    struct bap_polynom_mpz *r = bap_new_polynom_mpz();
+                    bap_pow_polynom_mpz(r, Q, (bav_Idegree)dP);
+                    out[k] = r; deg[k] = 0; k++;
+                } else {
+                    /* The subresultant PRS, mirroring algo_new_COEFF.
+                       A = S_{c-1}, B = S_{d-1}, s = lc(S_d). */
+                    struct bap_polynom_mpz coeff, s, Z;
+                    struct bap_polynom_mpz *A, *B;
+                    bav_Idegree delta;
+                    bap_init_readonly_polynom_mpz(&coeff);
+                    bap_init_polynom_mpz(&s);
+                    bap_init_polynom_mpz(&Z);
+                    bap_initial2_polynom_mpz(&coeff, Q, v);
+                    delta = bap_leading_degree_polynom_mpz(P)
+                            - bap_degree_polynom_mpz(Q, v);
+                    bap_pow_polynom_mpz(&s, &coeff, delta);
+                    A = bap_new_polynom_mpz();
+                    B = bap_new_polynom_mpz();
+                    bap_set_polynom_mpz(A, Q);
+                    {
+                        bav_Idegree hd;
+                        bap_prem_polynom_mpz(B, &hd, P, Q, v);
+                    }
+                    bap_neg_polynom_mpz(B, B);
+                    /* record the higher-degree starting subresultants:
+                       Q (= A, the lower-degree input) is the top of its degree */
+                    {
+                        struct bap_polynom_mpz *qc = bap_new_polynom_mpz();
+                        bap_set_polynom_mpz(qc, Q);
+                        out[k] = qc; deg[k] = (long)bap_degree_polynom_mpz(Q, v);
+                        k++;
+                    }
+                    for (;;) {
+                        if (k + 2 > cap) { *count = -1;
+                            strncpy(err, "subres chain overflow", n-1);
+                            err[n-1]=0; break; }
+                        if (bap_is_zero_polynom_mpz(B)) break;
+                        /* B is the current subresultant S_{d-1}; record it. */
+                        {
+                            struct bap_polynom_mpz *bc = bap_new_polynom_mpz();
+                            bap_set_polynom_mpz(bc, B);
+                            out[k] = bc;
+                            deg[k] = (long)bap_degree_polynom_mpz(B, v);
+                            k++;
+                        }
+                        delta = bap_leading_degree_polynom_mpz(A)
+                                - bap_degree_polynom_mpz(B, v);
+                        bap_initial2_polynom_mpz(&coeff, B, v);
+                        bap_muldiv2_Lazard_polynom_mpz(&Z, B, &coeff, &s, delta);
+                        if (!bap_depend_polynom_mpz(&Z, v)) {
+                            /* Z is the (degree-0) resultant S_0 */
+                            struct bap_polynom_mpz *zc = bap_new_polynom_mpz();
+                            bap_set_polynom_mpz(zc, &Z);
+                            out[k] = zc; deg[k] = 0; k++;
+                            break;
+                        }
+                        /* Z = S_e: record it too (its degree may differ from B) */
+                        {
+                            struct bap_polynom_mpz *zc = bap_new_polynom_mpz();
+                            bap_set_polynom_mpz(zc, &Z);
+                            out[k] = zc;
+                            deg[k] = (long)bap_degree_polynom_mpz(&Z, v);
+                            k++;
+                        }
+                        bap_nsr2_Ducos_polynom_mpz(A, A, B, &Z, &s, v);
+                        { struct bap_polynom_mpz *t = A; A = B; B = t; }
+                        bap_lcoeff_polynom_mpz(&s, &Z, v);
+                    }
+                }
+                if (*count != -1) *count = k;
+            }
+        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return (*count == -1) ? 1 : 0;
+    }
+
     /* ---- product walks (factor / squarefree) --------------------------- */
     /* Compute the squarefree / irreducible factorization product into a
        caller-owned product, then expose its size, numeric factor, and per-factor
@@ -455,6 +566,7 @@ cdef extern from *:
     int sdp_primpart(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, const char *, char *, int)
     int sdp_resultant(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, const char *, char *, int)
     int sdp_gcd_prem(cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, const char *, long *, char *, int)
+    int sdp_subres_chain(cb.bap_polynom_mpz **, long *, long, long *, cb.bap_polynom_mpz *, cb.bap_polynom_mpz *, const char *, char *, int)
     cb.bap_product_mpz *sdp_factor(cb.bap_polynom_mpz *, int, char *, int)
     long sdp_product_size(cb.bap_product_mpz *)
     mpz_ptr sdp_product_numfactor(cb.bap_product_mpz *)
@@ -1085,6 +1197,35 @@ def gcd_prem(PolyHandle a, PolyHandle b, var, long epoch):
         if sdp_gcd_prem(out, a.ptr, b.ptr, vb, &hexp, err, ERRBUF) != 0:
             raise BladError(err.decode("utf-8", "replace"))
     return PolyHandle._wrap(out, epoch), int(hexp)
+
+
+DEF SUBRES_CAP = 512
+
+def subresultant_chain(PolyHandle a, PolyHandle b, var, long epoch):
+    """Full Ducos subresultant polynomial chain of ``a`` and ``b`` w.r.t. ``var``
+    (a BLAD name string, the highest-ranked variable of both).
+
+    Returns a list ``[(degree, PolyHandle), ...]`` of every subresultant
+    produced by the PRS (including the resultant ``S_0`` at degree 0 and the
+    lower-degree input).  The caller folds this into a ``{degree -> poly}`` dict.
+    """
+    cdef char err[ERRBUF]
+    err[0] = 0
+    cdef cb.bap_polynom_mpz *outarr[SUBRES_CAP]
+    cdef long degarr[SUBRES_CAP]
+    cdef long count = 0
+    cdef bytes vb
+    if var is None:
+        raise ValueError("subresultant_chain needs a variable name")
+    vb = var.encode("utf-8")
+    if sdp_subres_chain(outarr, degarr, SUBRES_CAP, &count,
+                        a.ptr, b.ptr, vb, err, ERRBUF) != 0:
+        raise BladError(err.decode("utf-8", "replace"))
+    out = []
+    cdef long i
+    for i in range(count):
+        out.append((int(degarr[i]), PolyHandle._wrap(outarr[i], epoch)))
+    return out
 
 
 def _factor_walk(PolyHandle a, int squarefree_only, long epoch):

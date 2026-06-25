@@ -1197,6 +1197,36 @@ class DifferentialPolynomial(Element):
         return DifferentialPolynomial._wrap_handle(
             R, _blad.resultant(self._h(), other._h(), bn, ep))
 
+    def subresultants(self, other, v):
+        r"""
+        Full Ducos subresultant polynomial chain of ``self`` and ``other`` w.r.t.
+        the jet ``v``, returned as a ``dict`` mapping each subresultant's degree
+        in ``v`` to the (lowest-index) subresultant of that degree.
+
+        ``v`` must be the highest-ranked variable of both operands (the Ducos
+        constraint), exactly as for :meth:`resultant`.  The resultant ``S_0`` is
+        the degree-0 entry; the lower-degree input is included at its own degree.
+
+        Each subresultant matches Sage's ``subresultants`` degree-by-degree **up
+        to a sign** (BLAD's Ducos convention); consumers compare up to a scalar.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: ch = R('u^3 - u').subresultants(R('u^2 + 1'), 'u')
+            sage: 0 in ch       # the resultant S_0 is always present
+            True
+        """
+        R = self.parent()
+        ep = R.epoch
+        bn = R._as_blad_name(v)
+        chain = {}
+        for deg, h in _blad.subresultant_chain(self._h(), other._h(), bn, ep):
+            if deg not in chain:
+                chain[deg] = DifferentialPolynomial._wrap_handle(R, h)
+        return chain
+
     def content(self, v=None):
         r"""
         Content w.r.t. the jet ``v`` (a name / element), or w.r.t. the leader if
