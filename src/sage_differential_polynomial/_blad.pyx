@@ -92,6 +92,11 @@ cdef extern from *:
         buf[n-1] = 0;
     }
 
+    /* DIAGNOSTIC: current depth of BLAD's exception-handler stack. */
+    static long sdp_exc_stack_size(void) {
+        return (long)ba0_global.exception.stack.size;
+    }
+
     /* bas_restart once.  NOTE: bas_restart bootstraps the ba0 exception
        machinery itself, so it must NOT be wrapped in BA0_TRY (the TRY macro
        pushes onto ba0_global.exception.stack, which bas_restart is what
@@ -114,15 +119,17 @@ cdef extern from *:
     /* Install a ranking from a fully-formatted "ranking(...)" string. */
     static int sdp_install_ranking(const char *rankstr, char *err, int n) {
         bav_Iordering r;
+        int ambiguous = 0;
         BA0_TRY {
             ba0_scanf_printf("%ordering", (char *)rankstr, &r);
             if (bav_R_ambiguous_symbols()) {
                 strncpy(err, "ambiguous symbols in ranking", n-1); err[n-1]=0;
-                return 1;
+                ambiguous = 1;      /* do NOT return inside TRY (frame leak) */
+            } else {
+                bav_push_ordering(r);
             }
-            bav_push_ordering(r);
         } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
-        return 0;
+        return ambiguous ? 1 : 0;
     }
 
     /* Allocate a fresh persistent bap_polynom_mpz on BLAD's stack. */
@@ -165,14 +172,19 @@ cdef extern from *:
     /* leader name; returns NULL if constant (no leader). */
     static char *sdp_leader(struct bap_polynom_mpz *p, char *err, int n) {
         char *s = (char*)0;
+        /* NOTE: the "no leader" cases (zero / constant polynomial) must NOT
+           `return` from inside the BA0_TRY body -- an early return skips
+           BA0_ENDTRY and therefore leaks the pushed exception frame on
+           ba0_global.exception.stack (overflowing at BA0_SIZE_EXCEPTION_STACK
+           after ~100 such calls).  Fall through to the single ENDTRY instead;
+           `s` stays NULL, which the caller reads as "no leader". */
         BA0_TRY {
-            if (bap_is_zero_polynom_mpz(p)) { return (char*)0; }
-            struct bav_variable *v = bap_leader_polynom_mpz(p);
-            if (v == (struct bav_variable*)0) return (char*)0;
-            /* a numeric polynomial has no real leader */
-            if (v->root->type == bav_independent_symbol &&
-                bap_nbmon_polynom_mpz(p) == 1) { /* fallthrough, still print */ }
-            s = ba0_new_printf("%v", v);
+            if (!bap_is_zero_polynom_mpz(p)) {
+                struct bav_variable *v = bap_leader_polynom_mpz(p);
+                if (v != (struct bav_variable*)0) {
+                    s = ba0_new_printf("%v", v);
+                }
+            }
         } BA0_CATCH { sdp_copymsg(err, n); return (char*)0; } BA0_ENDTRY;
         return s;
     }
@@ -180,14 +192,17 @@ cdef extern from *:
     /* differentiate w.r.t. a single derivation named `der`. */
     static int sdp_diff1(struct bap_polynom_mpz *out, struct bap_polynom_mpz *in,
                          const char *der, char *err, int n) {
+        int unknown = 0;
         BA0_TRY {
             struct bav_symbol *s = bav_R_string_to_existing_derivation((char*)der);
             if (s == (struct bav_symbol*)0) {
-                strncpy(err, "unknown derivation", n-1); err[n-1]=0; return 1;
+                strncpy(err, "unknown derivation", n-1); err[n-1]=0;
+                unknown = 1;        /* do NOT return inside TRY (frame leak) */
+            } else {
+                bap_diff_polynom_mpz(out, in, s);
             }
-            bap_diff_polynom_mpz(out, in, s);
         } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
-        return 0;
+        return unknown ? 1 : 0;
     }
 
     /* separant w.r.t. the leader. */
@@ -538,6 +553,7 @@ cdef extern from *:
     }
     """
     int sdp_init(char *, int)
+    long sdp_exc_stack_size()
     int sdp_install_ranking(const char *, char *, int)
     cb.bap_polynom_mpz *sdp_new_poly(char *, int)
     int sdp_parse(cb.bap_polynom_mpz *, const char *, char *, int)
@@ -589,6 +605,13 @@ def blad_init():
     cdef char err[ERRBUF]
     if sdp_init(err, ERRBUF) != 0:
         raise BladError(err.decode("utf-8", "replace"))
+
+
+def exception_stack_size():
+    """DIAGNOSTIC: current depth of BLAD's exception-handler stack
+    (``ba0_global.exception.stack.size``).  A monotonic climb across
+    operations indicates a leaked ``BA0_TRY`` frame."""
+    return sdp_exc_stack_size()
 
 
 def install_ranking(str rankstr):
@@ -943,6 +966,10 @@ def build_terms(list terms, list total_rank, long epoch):
 # ---------------------------------------------------------------------------
 def leader_name(PolyHandle h):
     cdef char err[ERRBUF]
+    err[0] = 0                      # sdp_leader leaves err untouched on the
+                                    # "no leader" path; without this the
+                                    # uninitialised buffer is read as a bogus
+                                    # BladError instead of a clean None.
     cdef char *s = sdp_leader(h.ptr, err, ERRBUF)
     if s == NULL:
         # could be a genuine error or "no leader" (constant). Distinguish:
