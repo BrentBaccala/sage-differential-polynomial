@@ -156,3 +156,83 @@ def run_regression(verbose=True):
 
     passed = sum(1 for _, c in checks if c)
     return passed, len(checks)
+
+
+def run_gc_regression(verbose=True):
+    r"""
+    Regression battery for the in-epoch arena garbage collector
+    (:meth:`~differential_polynomial_ring.DifferentialPolynomialRing.gc`).
+
+    Checks that ``gc()`` invalidates the BLAD handles and rolls back the arena,
+    yet every live element rematerializes transparently from its durable string
+    snapshot; that arithmetic results built *before* a GC are usable after; and
+    that repeated GC cycles are stable and actually reclaim the arena.
+
+    EXAMPLES::
+
+        sage: from sage_differential_polynomial.regression import run_gc_regression
+        sage: p, t = run_gc_regression(verbose=False)
+        sage: p == t
+        True
+    """
+    from . import _blad
+    R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+    checks = []
+
+    def chk(name, cond):
+        checks.append((name, bool(cond)))
+        if verbose:
+            print(("  ok   " if cond else "  FAIL ") + name)
+
+    chk("checkpoint_ready", _blad.gc_checkpoint_ready())
+
+    p = R('u[x,x]^2 + 3*u[x] - 5')
+    q = R('u[x,x] - u')
+
+    # handle-only arithmetic results created before a GC
+    s = p * q + p                     # _wrap_handle result, no string yet
+    d = p - q
+    s_before = str(s)
+
+    # grow the arena, snapshot usage, then GC
+    acc = R.zero()
+    for i in range(500):
+        acc = acc + p
+    used_before = _blad.stack_usage()
+    R.gc()
+    used_after = _blad.stack_usage()
+
+    chk("arena_grew", used_before > 0)
+    chk("arena_reclaimed", used_after < used_before)
+
+    # elements built before the GC rematerialize transparently
+    chk("rematerialize_transparent", str(s) == s_before)
+    chk("premade_arith_usable_after_gc", (d == p - q))
+    chk("accumulator_correct_after_gc", acc == R(500) * p)
+
+    # a fresh handle produced *after* the GC also survives the next GC
+    t2 = acc * q
+    t2_before = str(t2)
+    R.gc()
+    chk("post_gc_result_survives_next_gc", str(t2) == t2_before)
+
+    # repeated GC cycles are stable and keep the arena bounded
+    stable = True
+    for _ in range(10):
+        w = R.zero()
+        for _ in range(200):
+            w = w + p * q
+        R.gc()
+        if not (w == R(200) * (p * q)):
+            stable = False
+            break
+    chk("repeated_gc_cycles_stable", stable)
+
+    # equality / arithmetic across a GC boundary between the two operands
+    a = p * p
+    R.gc()
+    b = p * p
+    chk("cross_gc_equality", a == b)
+
+    passed = sum(1 for _, c in checks if c)
+    return passed, len(checks)

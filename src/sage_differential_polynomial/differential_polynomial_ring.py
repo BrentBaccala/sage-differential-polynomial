@@ -32,6 +32,7 @@ EXAMPLES::
 """
 
 import re
+import weakref
 
 # Import sage.all first to fully initialize the Sage library's import graph.
 # Under ``sage -python`` (as opposed to the ``sage`` REPL) importing granular
@@ -170,6 +171,13 @@ class DifferentialPolynomialRing(UniqueRepresentation, Parent):
         self._base_field = base_field
         self._jet_shadow_cache = []
         self._epoch = -1
+        # Live handle-only elements: those holding a BLAD handle but no durable
+        # ``_blad_string`` yet (the arithmetic-path ``_wrap_handle`` results).
+        # The arena GC snapshots exactly these to their string before rolling
+        # back the ba0 stack -- see :meth:`gc`.  A WeakSet so collected elements
+        # drop out on their own; ``DifferentialPolynomial`` is a pure-Python
+        # subclass of the cdef ``Element`` and so is weak-referenceable.
+        self._live_handles = weakref.WeakSet()
         Parent.__init__(self, base=base, category=Rings())
 
         _blad.blad_init()
@@ -229,6 +237,88 @@ class DifferentialPolynomialRing(UniqueRepresentation, Parent):
     def epoch(self):
         self._install()
         return self._epoch
+
+    # -- in-epoch arena garbage collection ----------------------------------
+    def _register_live(self, elt):
+        """Register a handle-only element (no ``_blad_string``, no ``_owned``)
+        so the arena :meth:`gc` snapshots it before reclaiming the ba0 stack."""
+        try:
+            self._live_handles.add(elt)
+        except TypeError:
+            pass
+
+    def force_epoch_bump(self):
+        r"""
+        Invalidate every live BLAD handle by bumping the epoch, WITHOUT
+        reinstalling the ranking.
+
+        The ranking / differential ring live on BLAD's *quiet* stack and survive
+        an arena roll-back untouched, so only the polynomial handles (into the
+        *main* stack) must be invalidated.  A plain epoch bump does that: on next
+        use each element's :meth:`~DifferentialPolynomial._h` sees the stale
+        stamp and re-parses from its durable string snapshot.  ``_installed``
+        stays this ring, so :meth:`_install`'s short-circuit keeps the ranking in
+        place (no ``install_ranking`` call).
+
+        This is the epoch half of :meth:`gc`; call :func:`_blad.arena_gc`
+        immediately before it (after snapshotting the live set).
+        """
+        cls = type(self)
+        cls._global_epoch += 1
+        self._epoch = cls._global_epoch
+        # _installed stays self: the ranking is not reinstalled.
+
+    def arena_usage_bytes(self):
+        """Bytes retained on BLAD's main stack above the GC checkpoint (the
+        reclaimable arena), or ``-1`` before any ranking is installed."""
+        return _blad.stack_usage()
+
+    def gc(self):
+        r"""
+        Run one in-epoch arena garbage collection.
+
+        Snapshot every live handle-only element to its durable BLAD string,
+        reclaim the whole ``bap`` arena on BLAD's main stack in O(1)
+        (:func:`_blad.arena_gc`), then bump the epoch
+        (:meth:`force_epoch_bump`) so the now-stale handles re-parse from their
+        snapshot on next use.  Transparent to callers: an element created before
+        a ``gc`` rematerializes on demand afterward.
+
+        Quiescent-point contract: must be called when no BLAD operation is in
+        flight (no live handle mid-computation on the C stack) -- e.g. at the
+        DifferentialThomas DoNextStep boundary.  The live set at such a point is
+        just the persistent structures' polynomials (queued systems, Janet-tree
+        leaves, cached initials/separants, collected cells), all modest.
+
+        EXAMPLES::
+
+            sage: from sage_differential_polynomial import DifferentialPolynomialRing
+            sage: R = DifferentialPolynomialRing(QQ, ['u'], ['x'])
+            sage: p = R('u[x,x]^2 + 3*u[x] - 5')
+            sage: q = p*p + R('u[x]')          # a handle-only arithmetic result
+            sage: R.gc()
+            sage: q                            # rematerializes transparently
+            u_x_x^4 + 6*u_x_x^2*u_x - 10*u_x_x^2 + 9*u_x^2 - 29*u_x + 25
+            sage: (q - (p*p + R('u[x]'))).is_zero()
+            True
+        """
+        # 1. snapshot every live handle-only element (handles still valid here)
+        for elt in list(self._live_handles):
+            if elt is None:
+                continue
+            try:
+                if elt._blad_string is None and elt._owned is None:
+                    elt._blad_string_lazy()
+            except Exception:
+                # An element with no live representation is already unusable;
+                # skip it rather than abort the GC.
+                pass
+        # 2. reclaim the arena, 3. invalidate handles via epoch bump
+        _blad.arena_gc()
+        self.force_epoch_bump()
+        # every survivor now carries a string snapshot; drop the registry (fresh
+        # post-GC handles re-register as they are created).
+        self._live_handles.clear()
 
     # -- introspection ------------------------------------------------------
     def derivations(self):
@@ -892,6 +982,11 @@ class DifferentialPolynomial(Element):
             self._blad_string = value._blad_string
             self._handle = value._handle
             self._handle_epoch = value._handle_epoch
+            # A copy of a handle-only element shares the live handle but not the
+            # (still-None) string; register it too so the arena GC snapshots it.
+            if (self._handle is not None and self._blad_string is None
+                    and self._owned is None):
+                parent._register_live(self)
         elif isinstance(value, str):
             self._blad_string = value
         elif value in ZZ:
@@ -949,6 +1044,9 @@ class DifferentialPolynomial(Element):
         # few sites that actually need it (_repr_/__hash__/__reduce__ and the
         # stale-handle recovery path in _h()).
         p._blad_string = None
+        # Register with the arena GC: a live handle with no durable string must
+        # be snapshotted before the ba0 stack rolls back (see the ring's gc()).
+        parent._register_live(p)
         return p
 
     def _blad_string_lazy(self):

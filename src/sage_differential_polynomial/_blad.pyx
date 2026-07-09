@@ -92,6 +92,57 @@ cdef extern from *:
         buf[n-1] = 0;
     }
 
+    /* --- in-epoch arena GC on the main ba0 stack -----------------------------
+       All bap polynomials are allocated on ba0's *main* stack (the current
+       stack during normal operation).  The differential ring itself -- its
+       variables/symbols (created lazily by prolongation) and its orderings --
+       lives on the *quiet* stack (bav_R_new_derivative / bav_push_ordering both
+       push_stack(&quiet) before allocating).  So a main-stack restore reclaims
+       every polynomial ever built while leaving the ring metadata untouched:
+       no jet variable is dangled, no re-parse of ring structures is needed.
+
+       sdp_record_gc_checkpoint records a mark on the main stack once, right
+       after the ranking is installed.  sdp_arena_gc rolls the main free pointer
+       back to that mark (O(1), reclaiming everything above it).  All
+       outstanding PolyHandle pointers into the main stack become invalid; the
+       Python layer snapshots every live handle-only element to its durable
+       BLAD string first, then bumps the epoch so stale handles re-parse. */
+    static struct ba0_mark sdp_gc_checkpoint;
+    static int sdp_gc_checkpoint_recorded = 0;
+
+    static void sdp_record_gc_checkpoint(void) {
+        if (sdp_gc_checkpoint_recorded) return;
+        ba0_record(&sdp_gc_checkpoint);
+        sdp_gc_checkpoint_recorded = 1;
+    }
+
+    static int sdp_gc_checkpoint_ready(void) {
+        return sdp_gc_checkpoint_recorded;
+    }
+
+    /* Wholesale reclaim of every bap polynomial allocated since the checkpoint.
+       Returns 0 (success / no-op if no checkpoint) or 1 on a BLAD exception. */
+    static int sdp_arena_gc(char *err, int n) {
+        if (!sdp_gc_checkpoint_recorded) return 0;
+        BA0_TRY {
+            ba0_restore(&sdp_gc_checkpoint);
+        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        return 0;
+    }
+
+    /* Bytes currently retained on the main stack above the checkpoint (the
+       reclaimable arena).  -1 if the checkpoint has not been recorded yet. */
+    static long sdp_stack_usage(void) {
+        struct ba0_mark cur;
+        long r = -1;
+        if (!sdp_gc_checkpoint_recorded) return -1;
+        BA0_TRY {
+            ba0_record(&cur);
+            r = (long) ba0_range_mark(&sdp_gc_checkpoint, &cur);
+        } BA0_CATCH { r = -1; } BA0_ENDTRY;
+        return r;
+    }
+
     /* DIAGNOSTIC: current depth of BLAD's exception-handler stack. */
     static long sdp_exc_stack_size(void) {
         return (long)ba0_global.exception.stack.size;
@@ -127,6 +178,9 @@ cdef extern from *:
                 ambiguous = 1;      /* do NOT return inside TRY (frame leak) */
             } else {
                 bav_push_ordering(r);
+                /* Record the arena-GC checkpoint on the main stack now: every
+                   bap polynomial built afterward is reclaimable wholesale. */
+                sdp_record_gc_checkpoint();
             }
         } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
         return ambiguous ? 1 : 0;
@@ -555,6 +609,9 @@ cdef extern from *:
     int sdp_init(char *, int)
     long sdp_exc_stack_size()
     int sdp_install_ranking(const char *, char *, int)
+    int sdp_arena_gc(char *, int)
+    long sdp_stack_usage()
+    int sdp_gc_checkpoint_ready()
     cb.bap_polynom_mpz *sdp_new_poly(char *, int)
     int sdp_parse(cb.bap_polynom_mpz *, const char *, char *, int)
     char *sdp_print(cb.bap_polynom_mpz *, char *, int)
@@ -620,6 +677,44 @@ def install_ranking(str rankstr):
     cdef bytes b = rankstr.encode("utf-8")
     if sdp_install_ranking(b, err, ERRBUF) != 0:
         raise BladError(err.decode("utf-8", "replace"))
+
+
+# ---------------------------------------------------------------------------
+# In-epoch arena garbage collection.
+#
+# ``arena_gc`` reclaims -- in O(1) -- every ``bap`` polynomial allocated on
+# BLAD's main stack since the ranking-install checkpoint.  The differential
+# ring (variables / symbols / orderings, all on the *quiet* stack) is untouched,
+# so no jet variable is dangled.  Every outstanding :class:`PolyHandle` into the
+# main stack is invalidated by the restore; the ring layer snapshots every live
+# handle-only element to its durable BLAD string *before* calling this, then
+# bumps the epoch so stale handles re-parse from that snapshot on next use.
+# ---------------------------------------------------------------------------
+def arena_gc():
+    """Reclaim all bap polynomials allocated since the GC checkpoint.
+
+    No-op (returns cleanly) if no checkpoint has been recorded yet (i.e. no
+    ranking has been installed).  Raises :class:`BladError` on a BLAD-level
+    failure of the underlying ``ba0_restore``."""
+    cdef char err[ERRBUF]
+    err[0] = 0
+    if sdp_arena_gc(err, ERRBUF) != 0:
+        raise BladError(err.decode("utf-8", "replace"))
+
+
+def stack_usage():
+    """Bytes currently retained on BLAD's main stack above the GC checkpoint
+    (the reclaimable arena), or ``-1`` if no checkpoint has been recorded yet.
+
+    This is the size-trigger signal for the periodic GC: it grows as
+    pseudo-division intermediates accumulate and drops back to ~0 after
+    :func:`arena_gc`."""
+    return int(sdp_stack_usage())
+
+
+def gc_checkpoint_ready():
+    """Whether the arena-GC checkpoint has been recorded (a ranking installed)."""
+    return bool(sdp_gc_checkpoint_ready())
 
 
 # ---------------------------------------------------------------------------
