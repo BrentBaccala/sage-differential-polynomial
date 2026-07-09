@@ -164,6 +164,17 @@ cdef extern from *:
         return 0;
     }
 
+    /* Per-stack high-water marks (bytes ever allocated): where the process
+       RSS actually lives.  main = polynomials (+ mpz limbs after the scoped
+       allocator swap); second = BLAD's internal scratch (push_another_stack);
+       quiet = the differential ring / orderings.  Pure reads, no TRY. */
+    static void sdp_stack_stats(long *main_max, long *second_max,
+                                long *quiet_max) {
+        *main_max = (long) ba0_max_alloc_stack(&ba0_global.stack.main);
+        *second_max = (long) ba0_max_alloc_stack(&ba0_global.stack.second);
+        *quiet_max = (long) ba0_max_alloc_stack(&ba0_global.stack.quiet);
+    }
+
     /* Bytes currently retained on the main stack above the checkpoint (the
        reclaimable arena).  -1 if the checkpoint has not been recorded yet. */
     static long sdp_stack_usage(void) {
@@ -645,6 +656,7 @@ cdef extern from *:
     int sdp_install_ranking(const char *, char *, int)
     int sdp_arena_gc(char *, int)
     long sdp_stack_usage()
+    void sdp_stack_stats(long *, long *, long *)
     int sdp_gc_checkpoint_ready()
     cb.bap_polynom_mpz *sdp_new_poly(char *, int)
     int sdp_parse(cb.bap_polynom_mpz *, const char *, char *, int)
@@ -749,6 +761,19 @@ def stack_usage():
 def gc_checkpoint_ready():
     """Whether the arena-GC checkpoint has been recorded (a ranking installed)."""
     return bool(sdp_gc_checkpoint_ready())
+
+
+def stack_stats():
+    """Per-stack high-water marks in bytes: ``(main, second, quiet)``.
+
+    ``main`` holds the polynomials (and, with the scoped GMP allocator swap,
+    their coefficient limbs); ``second`` is BLAD's internal scratch stack;
+    ``quiet`` is the differential ring / orderings.  High-water cells are
+    retained (reused, never returned to the OS), so these bound the BLAD
+    share of peak RSS."""
+    cdef long m = 0, s2 = 0, q = 0
+    sdp_stack_stats(&m, &s2, &q)
+    return (int(m), int(s2), int(q))
 
 
 # ---------------------------------------------------------------------------

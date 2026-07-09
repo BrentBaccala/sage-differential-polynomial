@@ -1324,12 +1324,14 @@ class DifferentialPolynomial(Element):
         """
         R = self.parent()
         bn = R._as_blad_name(name)
-        best = 0
-        for _coeff, term in _blad.read_terms(self._h()):
-            for nm, deg in term:
-                if nm == bn and deg > best:
-                    best = deg
-        return int(best)
+        # C-native query (bap_degree_polynom_mpz).  The old read_terms walk
+        # materialized the WHOLE polynomial as Python tuples per call -- called
+        # 2-3x per pseudo-division iteration on 10^5-term operands, it was a
+        # Python-object storm dominating the endgame wall and transient RSS.
+        # BLAD returns -1 for the zero polynomial; the historical (term-walk)
+        # convention here is 0 -- clamp to preserve it.
+        d = int(_blad.degree_in(self._h(), bn))
+        return d if d > 0 else 0
 
     def appearing_derivatives(self, as_names=False, selection="indeterminates"):
         r"""
