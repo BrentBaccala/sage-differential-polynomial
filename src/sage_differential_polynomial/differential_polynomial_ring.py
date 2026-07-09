@@ -273,6 +273,29 @@ class DifferentialPolynomialRing(UniqueRepresentation, Parent):
         reclaimable arena), or ``-1`` before any ranking is installed."""
         return _blad.stack_usage()
 
+    def set_gc_threshold(self, nbytes):
+        """Arm :meth:`maybe_gc`: run a :meth:`gc` whenever the reclaimable
+        arena exceeds ``nbytes``.  ``None`` (the default) disarms it."""
+        self._gc_threshold = nbytes
+
+    def maybe_gc(self):
+        """Size-triggered GC hook for hot loops: run :meth:`gc` iff the arena
+        exceeds the :meth:`set_gc_threshold` threshold.  Cheap when below
+        threshold or disarmed (one C stack-walk / attribute check).  Returns
+        True iff a GC ran.
+
+        Safe wherever :meth:`gc` is: any point where no BLAD C call is in
+        flight and every needed polynomial is held by a
+        :class:`DifferentialPolynomial` (the live-handle registry snapshots
+        them) -- e.g. between iterations of a pseudo-division loop."""
+        thr = getattr(self, "_gc_threshold", None)
+        if thr is None:
+            return False
+        if _blad.stack_usage() < thr:
+            return False
+        self.gc()
+        return True
+
     def gc(self):
         r"""
         Run one in-epoch arena garbage collection.
@@ -319,6 +342,12 @@ class DifferentialPolynomialRing(UniqueRepresentation, Parent):
         # every survivor now carries a string snapshot; drop the registry (fresh
         # post-GC handles re-register as they are created).
         self._live_handles.clear()
+        self._gc_count = getattr(self, "_gc_count", 0) + 1
+
+    @property
+    def gc_count(self):
+        """How many arena GCs this ring has run (diagnostic)."""
+        return getattr(self, "_gc_count", 0)
 
     # -- introspection ------------------------------------------------------
     def derivations(self):
