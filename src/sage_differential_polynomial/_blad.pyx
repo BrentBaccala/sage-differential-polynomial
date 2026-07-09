@@ -92,6 +92,40 @@ cdef extern from *:
         buf[n-1] = 0;
     }
 
+    /* --- scoped GMP allocator swap (the BMI-Maple push/pop pattern) ---------
+       With the no-op set_memory_functions handed to ba0_set_settings_gmp,
+       BLAD's mpz limbs were allocated by the HOST (Sage) GMP allocator -- on
+       the malloc heap -- and, since BLAD's stack discipline never calls
+       mpz_clear, every coefficient of every intermediate leaked permanently
+       (measured ~12x the ba0-stack footprint; the true operand-swell driver).
+
+       Fix: swap GMP's allocator to BLAD's own stack-based one
+       (ba0_gmp_alloc/realloc/free, which allocate on the *current ba0 stack*)
+       for the duration of each BLAD call, restoring the host allocator on
+       every exit path (including the BA0_CATCH returns).  BLAD-internal limbs
+       then live on the ba0 stacks and are reclaimed wholesale by
+       sdp_arena_gc; host (Sage) mpz's are never touched while the swap is
+       active because no Python runs inside these helpers.  Depth-guarded for
+       safety (no helper nests today).                                        */
+    static void *(*sdp_host_alloc)(size_t);
+    static void *(*sdp_host_realloc)(void *, size_t, size_t);
+    static void (*sdp_host_free)(void *, size_t);
+    static int sdp_gmp_depth = 0;
+
+    static void sdp_gmp_push(void) {
+        if (sdp_gmp_depth++ == 0) {
+            mp_get_memory_functions(&sdp_host_alloc, &sdp_host_realloc,
+                                    &sdp_host_free);
+            mp_set_memory_functions(&ba0_gmp_alloc, &ba0_gmp_realloc,
+                                    &ba0_gmp_free);
+        }
+    }
+    static void sdp_gmp_pop(void) {
+        if (--sdp_gmp_depth == 0)
+            mp_set_memory_functions(sdp_host_alloc, sdp_host_realloc,
+                                    sdp_host_free);
+    }
+
     /* --- in-epoch arena GC on the main ba0 stack -----------------------------
        All bap polynomials are allocated on ba0's *main* stack (the current
        stack during normal operation).  The differential ring itself -- its
@@ -124,9 +158,9 @@ cdef extern from *:
        Returns 0 (success / no-op if no checkpoint) or 1 on a BLAD exception. */
     static int sdp_arena_gc(char *err, int n) {
         if (!sdp_gc_checkpoint_recorded) return 0;
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             ba0_restore(&sdp_gc_checkpoint);
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
@@ -136,10 +170,10 @@ cdef extern from *:
         struct ba0_mark cur;
         long r = -1;
         if (!sdp_gc_checkpoint_recorded) return -1;
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             ba0_record(&cur);
             r = (long) ba0_range_mark(&sdp_gc_checkpoint, &cur);
-        } BA0_CATCH { r = -1; } BA0_ENDTRY;
+        } BA0_CATCH { r = -1; } BA0_ENDTRY; sdp_gmp_pop();
         return r;
     }
 
@@ -160,10 +194,10 @@ cdef extern from *:
            so to_string() output re-parses and reads cleanly in _repr_. */
         ba0_set_settings_gmp(&sdp_noop_set_memory_functions, (char *)0);
         bas_restart(0, 0);
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             bav_set_settings_ordering("ranking");
             sdp_initialized = 1;
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
@@ -171,7 +205,7 @@ cdef extern from *:
     static int sdp_install_ranking(const char *rankstr, char *err, int n) {
         bav_Iordering r;
         int ambiguous = 0;
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             ba0_scanf_printf("%ordering", (char *)rankstr, &r);
             if (bav_R_ambiguous_symbols()) {
                 strncpy(err, "ambiguous symbols in ranking", n-1); err[n-1]=0;
@@ -182,33 +216,33 @@ cdef extern from *:
                    bap polynomial built afterward is reclaimable wholesale. */
                 sdp_record_gc_checkpoint();
             }
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return ambiguous ? 1 : 0;
     }
 
     /* Allocate a fresh persistent bap_polynom_mpz on BLAD's stack. */
     static struct bap_polynom_mpz *sdp_new_poly(char *err, int n) {
         struct bap_polynom_mpz *p = (struct bap_polynom_mpz *)0;
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             p = bap_new_polynom_mpz();
-        } BA0_CATCH { sdp_copymsg(err, n); return (struct bap_polynom_mpz*)0; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return (struct bap_polynom_mpz*)0; } BA0_ENDTRY; sdp_gmp_pop();
         return p;
     }
 
     /* Parse a polynomial from a string (used only for small inputs / tests). */
     static int sdp_parse(struct bap_polynom_mpz *p, const char *s, char *err, int n) {
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             ba0_sscanf2((char *)s, "%Az", p);
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
     /* Print a polynomial to a freshly-allocated string. */
     static char *sdp_print(struct bap_polynom_mpz *p, char *err, int n) {
         char *s = (char*)0;
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             s = ba0_new_printf("%Az", p);
-        } BA0_CATCH { sdp_copymsg(err, n); return (char*)0; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return (char*)0; } BA0_ENDTRY; sdp_gmp_pop();
         return s;
     }
 
@@ -232,14 +266,14 @@ cdef extern from *:
            ba0_global.exception.stack (overflowing at BA0_SIZE_EXCEPTION_STACK
            after ~100 such calls).  Fall through to the single ENDTRY instead;
            `s` stays NULL, which the caller reads as "no leader". */
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             if (!bap_is_zero_polynom_mpz(p)) {
                 struct bav_variable *v = bap_leader_polynom_mpz(p);
                 if (v != (struct bav_variable*)0) {
                     s = ba0_new_printf("%v", v);
                 }
             }
-        } BA0_CATCH { sdp_copymsg(err, n); return (char*)0; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return (char*)0; } BA0_ENDTRY; sdp_gmp_pop();
         return s;
     }
 
@@ -247,7 +281,7 @@ cdef extern from *:
     static int sdp_diff1(struct bap_polynom_mpz *out, struct bap_polynom_mpz *in,
                          const char *der, char *err, int n) {
         int unknown = 0;
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             struct bav_symbol *s = bav_R_string_to_existing_derivation((char*)der);
             if (s == (struct bav_symbol*)0) {
                 strncpy(err, "unknown derivation", n-1); err[n-1]=0;
@@ -255,32 +289,32 @@ cdef extern from *:
             } else {
                 bap_diff_polynom_mpz(out, in, s);
             }
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return unknown ? 1 : 0;
     }
 
     /* separant w.r.t. the leader. */
     static int sdp_separant(struct bap_polynom_mpz *out, struct bap_polynom_mpz *in,
                             char *err, int n) {
-        BA0_TRY { bap_separant_polynom_mpz(out, in); }
-        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        sdp_gmp_push(); BA0_TRY { bap_separant_polynom_mpz(out, in); }
+        BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
     /* separant2 w.r.t. a named variable v (formal jet-partial). */
     static int sdp_separant2(struct bap_polynom_mpz *out, struct bap_polynom_mpz *in,
                              const char *var, char *err, int n) {
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             struct bav_variable *v = (struct bav_variable*)0;
             ba0_sscanf2((char*)var, "%v", &v);
             bap_separant2_polynom_mpz(out, in, v);
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
     static int sdp_initial(struct bap_polynom_mpz *out, struct bap_polynom_mpz *in,
                            char *err, int n) {
-        BA0_TRY { bap_initial_polynom_mpz(out, in); }
-        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        sdp_gmp_push(); BA0_TRY { bap_initial_polynom_mpz(out, in); }
+        BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
@@ -288,51 +322,51 @@ cdef extern from *:
     static int sdp_prem(struct bap_polynom_mpz *out, long *h,
                         struct bap_polynom_mpz *A, struct bap_polynom_mpz *B,
                         char *err, int n) {
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             struct bav_variable *v = bap_leader_polynom_mpz(B);
             bav_Idegree hd = 0;
             bap_prem_polynom_mpz(out, &hd, A, B, v);
             *h = (long)hd;
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
     /* prem of A by B w.r.t. a *named* leader variable (explicit reduction var). */
     static int sdp_prem_var(struct bap_polynom_mpz *out, long *h,
                             struct bap_polynom_mpz *A, struct bap_polynom_mpz *B,
                             const char *var, char *err, int n) {
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             struct bav_variable *v = (struct bav_variable*)0;
             ba0_sscanf2((char*)var, "%v", &v);
             bav_Idegree hd = 0;
             bap_prem_polynom_mpz(out, &hd, A, B, v);
             *h = (long)hd;
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
     /* C-native ring arithmetic (no materialization to Sage). */
     static int sdp_add(struct bap_polynom_mpz *o, struct bap_polynom_mpz *a,
                        struct bap_polynom_mpz *b, char *err, int n) {
-        BA0_TRY { bap_add_polynom_mpz(o, a, b); }
-        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        sdp_gmp_push(); BA0_TRY { bap_add_polynom_mpz(o, a, b); }
+        BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
     static int sdp_sub(struct bap_polynom_mpz *o, struct bap_polynom_mpz *a,
                        struct bap_polynom_mpz *b, char *err, int n) {
-        BA0_TRY { bap_sub_polynom_mpz(o, a, b); }
-        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        sdp_gmp_push(); BA0_TRY { bap_sub_polynom_mpz(o, a, b); }
+        BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
     static int sdp_mul(struct bap_polynom_mpz *o, struct bap_polynom_mpz *a,
                        struct bap_polynom_mpz *b, char *err, int n) {
-        BA0_TRY { bap_mul_polynom_mpz(o, a, b); }
-        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        sdp_gmp_push(); BA0_TRY { bap_mul_polynom_mpz(o, a, b); }
+        BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
     static int sdp_neg(struct bap_polynom_mpz *o, struct bap_polynom_mpz *a,
                        char *err, int n) {
-        BA0_TRY { bap_neg_polynom_mpz(o, a); }
-        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        sdp_gmp_push(); BA0_TRY { bap_neg_polynom_mpz(o, a); }
+        BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
@@ -351,28 +385,28 @@ cdef extern from *:
     /* degree of A in the named variable v. */
     static int sdp_degree(struct bap_polynom_mpz *A, const char *var,
                           long *out, char *err, int n) {
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             struct bav_variable *v = sdp_var(var);
             *out = (long)bap_degree_polynom_mpz(A, v);
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
     /* coefficient of A by (variable v, degree d): out = coeff(A, v^d). */
     static int sdp_coeff(struct bap_polynom_mpz *out, struct bap_polynom_mpz *A,
                          const char *var, long d, char *err, int n) {
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             struct bav_variable *v = sdp_var(var);
             bap_coeff_polynom_mpz(out, A, v, (bav_Idegree)d);
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
     /* exact quotient out = A / B (B must divide A). */
     static int sdp_exquo(struct bap_polynom_mpz *out, struct bap_polynom_mpz *A,
                          struct bap_polynom_mpz *B, char *err, int n) {
-        BA0_TRY { bap_exquo_polynom_mpz(out, A, B); }
-        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        sdp_gmp_push(); BA0_TRY { bap_exquo_polynom_mpz(out, A, B); }
+        BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
@@ -380,8 +414,8 @@ cdef extern from *:
     static int sdp_is_factor(struct bap_polynom_mpz *A, struct bap_polynom_mpz *B,
                              struct bap_polynom_mpz *out_q, int *res,
                              char *err, int n) {
-        BA0_TRY { *res = bap_is_factor_polynom_mpz(A, B, out_q) ? 1 : 0; }
-        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        sdp_gmp_push(); BA0_TRY { *res = bap_is_factor_polynom_mpz(A, B, out_q) ? 1 : 0; }
+        BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
@@ -390,26 +424,26 @@ cdef extern from *:
                        struct bap_polynom_mpz *cofA, struct bap_polynom_mpz *cofB,
                        struct bap_polynom_mpz *A, struct bap_polynom_mpz *B,
                        char *err, int n) {
-        BA0_TRY { baz_gcd_polynom_mpz(G, cofA, cofB, A, B); }
-        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        sdp_gmp_push(); BA0_TRY { baz_gcd_polynom_mpz(G, cofA, cofB, A, B); }
+        BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
     /* content / primpart of A w.r.t. named variable v (or leader if NULL). */
     static int sdp_content(struct bap_polynom_mpz *out, struct bap_polynom_mpz *A,
                            const char *var, char *err, int n) {
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             struct bav_variable *v = sdp_var(var);
             baz_content_polynom_mpz(out, A, v);
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
     static int sdp_primpart(struct bap_polynom_mpz *out, struct bap_polynom_mpz *A,
                             const char *var, char *err, int n) {
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             struct bav_variable *v = sdp_var(var);
             baz_primpart_polynom_mpz(out, A, v);
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
@@ -424,7 +458,7 @@ cdef extern from *:
     static int sdp_resultant(struct bap_polynom_mpz *out,
                              struct bap_polynom_mpz *P, struct bap_polynom_mpz *Q,
                              const char *var, char *err, int n) {
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             struct bav_variable *v = sdp_var(var);
             if (bap_is_zero_polynom_mpz(P) || bap_is_zero_polynom_mpz(Q)) {
                 bap_set_polynom_zero_mpz(out);
@@ -441,7 +475,7 @@ cdef extern from *:
                     bap_expand_product_mpz(out, prod);
                 }
             }
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
@@ -451,7 +485,7 @@ cdef extern from *:
     static int sdp_gcd_prem(struct bap_polynom_mpz *R, struct bap_polynom_mpz *A,
                             struct bap_polynom_mpz *B, const char *var,
                             long *hexp, char *err, int n) {
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             struct bav_variable *v = sdp_var(var);
             if (v == (struct bav_variable*)0) v = bap_leader_polynom_mpz(B);
             struct bap_product_mpz *H = bap_new_product_mpz();
@@ -459,7 +493,7 @@ cdef extern from *:
             long e = 0; long i;
             for (i = 0; i < H->size; i++) e += (long)H->tab[i].exponent;
             *hexp = e;
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
 
@@ -483,7 +517,7 @@ cdef extern from *:
                                 struct bap_polynom_mpz *P0,
                                 struct bap_polynom_mpz *Q0,
                                 const char *var, char *err, int n) {
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             struct bav_variable *v = sdp_var(var);
             long k = 0;
             struct bap_polynom_mpz *P = P0, *Q = Q0;
@@ -570,7 +604,7 @@ cdef extern from *:
                 }
                 if (*count != -1) *count = k;
             }
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return (*count == -1) ? 1 : 0;
     }
 
@@ -583,13 +617,13 @@ cdef extern from *:
                                               int squarefree_only,
                                               char *err, int n) {
         struct bap_product_mpz *prod = (struct bap_product_mpz*)0;
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             prod = bap_new_product_mpz();
             if (squarefree_only)
                 baz_squarefree_polynom_mpz(prod, A);
             else
                 baz_factor_polynom_mpz(prod, A);
-        } BA0_CATCH { sdp_copymsg(err, n); return (struct bap_product_mpz*)0; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return (struct bap_product_mpz*)0; } BA0_ENDTRY; sdp_gmp_pop();
         return prod;
     }
     static long sdp_product_size(struct bap_product_mpz *p) {
@@ -806,11 +840,11 @@ cdef extern from *:
 
     static int sdp_iter_begin(struct sdp_iter *s, struct bap_polynom_mpz *p,
                               char *err, int n) {
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             bav_init_term(&s->T);
             bap_begin_itermon_mpz(&s->it, p);
             s->started = 1;
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
     static int sdp_iter_outof(struct sdp_iter *s) {
@@ -832,8 +866,8 @@ cdef extern from *:
     /* name of j-th variable in current term (must call termsize first) */
     static char *sdp_iter_varname(struct sdp_iter *s, long j, char *err, int n) {
         char *r = (char*)0;
-        BA0_TRY { r = ba0_new_printf("%v", s->T.rg[j].var); }
-        BA0_CATCH { sdp_copymsg(err, n); return (char*)0; } BA0_ENDTRY;
+        sdp_gmp_push(); BA0_TRY { r = ba0_new_printf("%v", s->T.rg[j].var); }
+        BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return (char*)0; } BA0_ENDTRY; sdp_gmp_pop();
         return r;
     }
     static long sdp_iter_vardeg(struct sdp_iter *s, long j) {
@@ -856,7 +890,7 @@ cdef extern from *:
     static int sdp_build_begin(struct sdp_builder *b, struct bap_polynom_mpz *p,
                                const char **tot_names, long *tot_degs, long tot_size,
                                long nmon, char *err, int n) {
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             bav_init_term(&b->tot);
             bav_init_term(&b->cur);
             long i;
@@ -871,14 +905,14 @@ cdef extern from *:
             }
             bap_begin_creator_mpz(&b->crea, p, &b->tot, bap_exact_total_rank, (ba0_int_p)nmon);
             b->open = 1;
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
     /* write one monomial: coeff (mpz) and a (name,deg) list for its term. */
     static int sdp_build_write(struct sdp_builder *b, mpz_srcptr coeff,
                                const char **names, long *degs, long size,
                                char *err, int n) {
-        BA0_TRY {
+        sdp_gmp_push(); BA0_TRY {
             bav_set_term_one(&b->cur);
             long i;
             for (i = 0; i < size; i++) {
@@ -893,12 +927,12 @@ cdef extern from *:
             ba0_mpz_init(c);
             ba0_mpz_set(c, (mpz_ptr)coeff);
             bap_write_creator_mpz(&b->crea, &b->cur, c);
-        } BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        } BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
     static int sdp_build_close(struct sdp_builder *b, char *err, int n) {
-        BA0_TRY { bap_close_creator_mpz(&b->crea); b->open = 0; }
-        BA0_CATCH { sdp_copymsg(err, n); return 1; } BA0_ENDTRY;
+        sdp_gmp_push(); BA0_TRY { bap_close_creator_mpz(&b->crea); b->open = 0; }
+        BA0_CATCH { sdp_copymsg(err, n); sdp_gmp_pop(); return 1; } BA0_ENDTRY; sdp_gmp_pop();
         return 0;
     }
     """
