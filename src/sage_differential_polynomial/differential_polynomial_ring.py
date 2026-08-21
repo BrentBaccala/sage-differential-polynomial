@@ -630,25 +630,63 @@ class DifferentialPolynomialRing(UniqueRepresentation, Parent):
                       key=lambda d: self._ranking_key(self._as_blad_name(d)),
                       reverse=not reverse)
 
-    def differential_prem(self, p, reductors):
+    def differential_prem(self, p, reductors, max_passes=64):
         r"""
         Full **differential** pseudo-remainder of ``p`` by ``reductors``.
 
-        Reduce ``p`` by each reductor *and all its derivatives* (Ritt
-        reduction), highest-leader-first.  This is the differential analogue of
-        :meth:`DifferentialPolynomial.prem` (which reduces by a single algebraic
-        leader only): a derivative ``D`` strictly above a reductor's leader is
-        eliminated by that reductor prolonged to leader ``D``; the leader itself
-        is reduced last.
+        Reduce ``p`` by every reductor *and all its derivatives* (Ritt
+        reduction) until the remainder is reduced with respect to the whole
+        set: no derivative of any reductor's leader, at or above that leader,
+        survives in ``r``.  This is the differential analogue of
+        :meth:`DifferentialPolynomial.prem` (which reduces by a single
+        algebraic leader only): a derivative ``D`` strictly above a reductor's
+        leader is eliminated by that reductor prolonged to leader ``D``; the
+        leader itself is reduced last.
 
-        Returns ``(r, h)`` where ``r`` is the reduced
-        :class:`DifferentialPolynomial` and ``h`` is the product of the
-        initials/separants the reduction multiplied through (a
-        :class:`DifferentialPolynomial`; ``R.one()`` if none) -- the
-        non-vanishing Thomas inequation cofactor.
+        .. NOTE::
 
-        v1 supports a list with a single reductor (matching the consumer);
-        a multi-reductor list reduces against each in turn.
+            **One sweep over the reductor list is not enough, and no ordering
+            of the list makes it enough.**  Reducing by a reductor PROLONGS
+            it, and the prolonged tail can contain a derivative of *another*
+            reductor's leader -- one the sweep has already gone past.  This is
+            why the method iterates to a fixed point rather than making a
+            single ordered pass.
+
+            Autoreducedness does not rescue the single sweep either.  Being
+            reduced w.r.t. `A_j` constrains `A_i`, not `\partial A_i`, and it
+            is the prolongation that does the damage: with the autoreduced
+            pair ``{w[x] - w, u - w}`` (leaders ``w_x`` and ``u``), eliminating
+            ``u_x`` prolongs ``u - w`` to ``u_x - w_x`` and so introduces
+            ``w_x`` -- the *higher* leader, already passed under a
+            highest-leader-first order.  See
+            :mod:`sage_differential_polynomial.regression_set` for that case
+            and its mirror image worked as doctests (they need a two-head ring,
+            which cannot share a session with this module's one-head ring).
+
+            A single reductor never needs a second pass:
+            :meth:`_differential_prem_one` is itself a fixed point over all
+            derivatives of that reductor's head.  Only a SET can need one.
+
+        INPUT:
+
+        - ``p`` -- the differential polynomial to reduce; coerced into this
+          ring if it is not already an element
+
+        - ``reductors`` -- a reductor, or a list/tuple of them
+
+        - ``max_passes`` -- integer (default: 64); cap on sweeps over the
+          reductor list.  Ritt reduction terminates by a well-ordering on the
+          ranking, so the cap is a backstop against a bug, not a limit reached
+          in practice; exceeding it raises rather than returning a remainder
+          that is silently under-reduced.
+
+        OUTPUT:
+
+        a pair ``(r, h)`` -- the reduced :class:`DifferentialPolynomial`, and
+        the product of the initials/separants the reduction multiplied through
+        (a :class:`DifferentialPolynomial`; ``R.one()`` if none), so that
+        ``h*p`` is congruent to ``r``.  ``h`` is the non-vanishing Thomas
+        inequation cofactor, and it accumulates across every sweep.
 
         EXAMPLES::
 
@@ -658,17 +696,44 @@ class DifferentialPolynomialRing(UniqueRepresentation, Parent):
             sage: B = R('u[x,x] - u^2')
             sage: r, h = R.differential_prem(A, [B]); r
             4*u_x^2*u^2 + u^2 - u
+
+        A bare reductor is accepted as well as a list::
+
+            sage: R.differential_prem(A, B)[0]
+            4*u_x^2*u^2 + u^2 - u
+
+        Reducing to zero stops immediately::
+
+            sage: R.differential_prem(R('u[x,x] - u^2'), [B])[0]
+            0
+
+        TESTS:
+
+        ``max_passes`` refuses to return an under-reduced remainder::
+
+            sage: R.differential_prem(A, [B], max_passes=0)
+            Traceback (most recent call last):
+            ...
+            RuntimeError: differential_prem did not converge in 0 passes...
         """
         if not isinstance(reductors, (list, tuple)):
             reductors = [reductors]
         r = self(p) if not isinstance(p, DifferentialPolynomial) else p
         h = self.one()
-        for B in reductors:
-            r, hB = self._differential_prem_one(r, B)
-            h = h * hB
-            if r.is_zero():
-                break
-        return r, h
+        for _ in range(max_passes):
+            before = r
+            for B in reductors:
+                r, hB = self._differential_prem_one(r, B)
+                h = h * hB
+                if r.is_zero():
+                    return r, h
+            if r == before:
+                return r, h
+        raise RuntimeError(
+            "differential_prem did not converge in %d passes over %d "
+            "reductor(s); Ritt reduction terminates, so this is a bug -- "
+            "raise max_passes only if you have a reason to believe otherwise"
+            % (max_passes, len(reductors)))
 
     def _differential_prem_one(self, A, B):
         """Full differential pseudo-remainder of ``A`` by a single reductor
